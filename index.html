@@ -567,6 +567,7 @@ function colourOf(i) {
   return TYPE_COLOUR[t] || '#ff00ff';
 }
 const ROCK_TYPES = [2, 4, 5];   // stone, unusable stone, iron
+const RING = 1;                 // appearance only: light-yellow cells around each structure (0 = just its own cell)
 function paintCell(i) {
   const x = i % W, z = (i - x) / W, px = x * SIZE, pz = z * SIZE;
   const [t, f, a, s, d] = cells[i];
@@ -988,11 +989,20 @@ function outlineRect(r) {
 function drawOverlay() {
   og.clearRect(0, 0, ov.width, ov.height);
   if (showBuildings && BUILD.length) {          // structures as small gold dots
-    og.fillStyle = 'rgba(255,236,140,0.45)';          // light yellow: cells a structure occupies
+    // light yellow appearance overlay: the structure's cell plus a fixed ring of RING cells around it.
+    // This is cosmetic only; it does not model the game's real footprint.
+    og.fillStyle = 'rgba(255,236,140,0.45)';
+    const lit = new Set();
     BUILD.forEach(b => {
-      const x = Math.floor(b[0]), z = Math.floor(b[1]);
-      if (x < 0 || z < 0 || x >= W || z >= H) return;
-      og.fillRect(x * SIZE, z * SIZE, SIZE, SIZE);
+      const x0 = Math.floor(b[0]), z0 = Math.floor(b[1]);
+      for (let dz = -RING; dz <= RING; dz++) for (let dx = -RING; dx <= RING; dx++) {
+        const x = x0 + dx, z = z0 + dz;
+        if (x < 0 || z < 0 || x >= W || z >= H) continue;
+        const k = z * W + x;
+        if (lit.has(k)) continue;
+        lit.add(k);
+        og.fillRect(x * SIZE, z * SIZE, SIZE, SIZE);
+      }
     });
     og.fillStyle = '#ffd24a';                         // solid mini box at each structure's position
     const m = Math.max(3, SIZE * 0.4), mh = m / 2;
