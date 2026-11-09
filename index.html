@@ -988,12 +988,15 @@ function outlineRect(r) {
 function drawOverlay() {
   og.clearRect(0, 0, ov.width, ov.height);
   if (showBuildings && BUILD.length) {          // structures as small gold dots
-    og.fillStyle = '#ffd24a';                         // every cell a structure occupies is yellow
+    og.fillStyle = 'rgba(255,236,140,0.45)';          // light yellow: cells a structure occupies
     BUILD.forEach(b => {
       const x = Math.floor(b[0]), z = Math.floor(b[1]);
       if (x < 0 || z < 0 || x >= W || z >= H) return;
       og.fillRect(x * SIZE, z * SIZE, SIZE, SIZE);
     });
+    og.fillStyle = '#ffd24a';                         // solid mini box at each structure's position
+    const m = Math.max(3, SIZE * 0.4), mh = m / 2;
+    BUILD.forEach(b => og.fillRect(b[0] * SIZE - mh, b[1] * SIZE - mh, m, m));
   }
   if (copyMode === 'select' && selStart && selEnd) outlineRect(normRect(selStart, selEnd));
   else if (selRect) outlineRect(selRect);
