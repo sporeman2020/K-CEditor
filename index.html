@@ -980,11 +980,14 @@ function generateFertility(onlyCells) {
       treeP.set(c, r);
     }
   }
-  // trees: more likely on richer soil, never on a structure's cell
+  // trees: roots reach groundwater, so they are likelier near water and on richer soil; never on a structure's cell
   const treeAmt = new Map();
   treeP.forEach((r, c) => {
     if (cells[c][0] !== 0 || bIndex.has(c)) return;
-    if (rnd() < 0.45 * r * r) treeAmt.set(c, 1 + Math.floor(rnd() * 3));
+    const f = newVal.has(c) ? newVal.get(c) : cells[c][1];
+    const water = 0.3 + 0.7 * Math.exp(-dist[c] / 5);
+    const soil = f === 2 ? 1 : f === 1 ? 0.75 : 0.5;
+    if (rnd() < 0.5 * water * soil) treeAmt.set(c, 1 + Math.floor(rnd() * 3));
   });
   // write the values, recording one stroke so Undo reverts the whole fill
   const stroke = [];
@@ -1196,9 +1199,15 @@ function readEntries(dir) {
 }
 function saveNameFromSummary(buf) {
   const s = new TextDecoder('latin1').decode(new Uint8Array(buf));
-  const runs = s.match(/[\x20-\x7e]{3,}/g) || [];
-  const i = runs.findIndex(r => /^P5F/.test(r.trim()));
-  return i > 0 ? runs[i - 1].trim() : '';
+  const idx = s.indexOf('P5F');
+  if (idx < 0) return '';
+  for (let p = idx - 1; p >= Math.max(0, idx - 80); p--) {
+    const L = s.charCodeAt(p);
+    if (L < 3 || L > 40 || p + 1 + L > idx) continue;
+    const name = s.substr(p + 1, L);
+    if (/^[A-Za-z][A-Za-z ]*$/.test(name)) return name;
+  }
+  return '';
 }
 function buildingsOf(parsed) {
   const res = v => (v && typeof v === 'object' && v.ref !== undefined) ? parsed.objs.get(v.ref) : v;
