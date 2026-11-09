@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KC save patcher</title>
+<style>
+  :root { --bg:#f6f5f2; --fg:#1d1d1b; --muted:#6b6a65; --card:#ffffff; --line:#d9d6cd; --ok:#2c7a3f; --bad:#b03a2e; --accent:#2f5d8a; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg:#1b1c1f; --fg:#ecebe6; --muted:#9c9a93; --card:#25262a; --line:#3a3b40; --ok:#6fcf86; --bad:#ff8a7d; --accent:#8fb8e8; }
+  }
+  :root[data-theme="dark"] { --bg:#1b1c1f; --fg:#ecebe6; --muted:#9c9a93; --card:#25262a; --line:#3a3b40; --ok:#6fcf86; --bad:#ff8a7d; --accent:#8fb8e8; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p.lead { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:14px; }
+  .card h2 { font-size:16px; margin:0 0 8px; }
+  input[type=file] { width:100%; }
+  button { font:inherit; padding:10px 16px; border-radius:8px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+  a.dl { display:inline-block; margin-top:10px; font-weight:600; color:var(--accent); }
+  #status { white-space:pre-wrap; font-family:ui-monospace, Consolas, monospace; font-size:13px; color:var(--muted); margin:0; }
+  #status.ok { color:var(--ok); }
+  #status.bad { color:var(--bad); }
+  ol { padding-left:20px; margin:8px 0 0; color:var(--muted); }
+  .privacy { color:var(--muted); font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>KC save patcher</h1>
+  <p class="lead">Applies a <code>cell_edits.json</code> from the editor to a save's <code>world</code> file, then lets you download the new world file. Everything runs in this page. Nothing is uploaded.</p>
+
+  <div class="card">
+    <h2>1. Pick the save's world file</h2>
+    <input type="file" id="worldFile" accept="*">
+  </div>
+
+  <div class="card">
+    <h2>2. Pick the edits file</h2>
+    <input type="file" id="editsFile" accept=".json,application/json">
+  </div>
+
+  <div class="card">
+    <h2>3. Build the patched world</h2>
+    <button id="build" disabled>Build patched world</button>
+    <div><a class="dl" id="download" hidden>Download world</a></div>
+    <p id="status">Waiting for files.</p>
+  </div>
+
+  <div class="card">
+    <h2>Using the result</h2>
+    <ol>
+      <li>Make a new folder in <code>...\Kingdoms and Castles\Saves\</code> with any new name (a GUID works).</li>
+      <li>Copy <code>summary</code>, <code>cover</code> and <code>custombanner.png</code> from the original save folder into it.</li>
+      <li>Save the downloaded file into that folder as <code>world</code> (no extension).</li>
+      <li>Start the game and load the new save.</li>
+    </ol>
+  </div>
+
+  <p class="privacy">The patch keeps every value the same size, so the file length never changes. The original save is not modified.</p>
+</main>
+
+<script>
+// Browser port of save_patch.py. Reads a Kingdoms and Castles "world" file (BinaryFormatter
+// NRBF), finds each cell's values by byte offset, writes the edits in place (same byte sizes,
+// so the file length never changes) and returns the new bytes. Nothing leaves the browser.
+(function (root) {
+  "use strict";
+
+  var CELL_CLASS = "Cell+CellSaveData";
+  var TYPE_CLASS = "ResourceType";
+  var CELL_FIELDS = ["amount", "fertile", "saltWater", "deepWater"];
+
+  // BinaryFormatter primitive type codes -> [getter, size]
+  var PRIM = {
+    1: ["bool", 1], 2: ["u8", 1], 3: ["u8", 1], 6: ["f64", 8], 7: ["i16", 2], 8: ["i32", 4],
+    9: ["i64", 8], 10: ["i8", 1], 11: ["f32", 4], 12: ["i64", 8], 13: ["i64", 8],
+    14: ["u16", 2], 15: ["u32", 4], 16: ["u64", 8]
+  };
+
+  function Reader(buf) {
+    this.u = new Uint8Array(buf);
+    this.dv = new DataView(buf);
+    this.p = 0;
+    this.objs = new Map();
+    this.classes = new Map();
+    this.cells = [];          // one entry per Cell+CellSaveData record, in file order
+    this.decoder = new TextDecoder("utf-8");
+  }
+
+  Reader.prototype.u8 = function () { return this.u[this.p++]; };
+
+  Reader.prototype.i32 = function () {
+    var v = this.dv.getInt32(this.p, true);
+    this.p += 4;
+    return v;
+  };
+
+  Reader.prototype.lengthStr = function () {
+    var n = 0, shift = 0, b;
+    for (;;) {
+      b = this.u8();
+      n |= (b & 0x7f) << shift;
+      shift += 7;
+      if (!(b & 0x80)) break;
+    }
+    var s = this.decoder.decode(this.u.subarray(this.p, this.p + n));
+    this.p += n;
+    return s;
+  };
+
+  // Read one primitive of BinaryFormatter type t at the current position.
+  Reader.prototype.prim = function (t) {
+    if (t === 18 || t === 5) return this.lengthStr();   // string / decimal-as-string
+    if (t === 17) return null;
+    var spec = PRIM[t];
+    if (!spec) throw new Error("unknown primitive type " + t + " at byte " + this.p);
+    var g = spec[0], size = spec[1], p = this.p, v;
+    switch (g) {
+      case "bool": v = this.u[p] !== 0; break;
+      case "u8": v = this.dv.getUint8(p); break;
+      case "i8": v = this.dv.getInt8(p); break;
+      case "i16": v = this.dv.getInt16(p, true); break;
+      case "u16": v = this.dv.getUint16(p, true); break;
+      case "i32": v = this.dv.getInt32(p, true); break;
+      case "u32": v = this.dv.getUint32(p, true); break;
+      case "f32": v = this.dv.getFloat32(p, true); break;
+      case "f64": v = this.dv.getFloat64(p, true); break;
+      case "i64": v = this.dv.getBigInt64(p, true); break;
+      case "u64": v = this.dv.getBigUint64(p, true); break;
+    }
+    this.p += size;
+    return v;
+  };
+
+  Reader.prototype.readHeader = function () {
+    var rec = this.u8();
+    if (rec !== 0) throw new Error("not an NRBF save (header byte " + rec + ")");
+    this.p += 16;
+  };
+
+  Reader.prototype.store = function (oid, val) {
+    this.objs.set(oid, val);
+    return val;
+  };
+
+  Reader.prototype.readRecord = function () {
+    var rt = this.u8(), oid, cls, vals, n, lengths, rank, atype, btype, info, arr, i, t, out;
+    switch (rt) {
+      case 0:  // SerializedStreamHeader (nested)
+        this.p += 16;
+        return null;
+      case 1:  // ClassWithId
+        oid = this.i32();
+        var meta = this.i32();
+        cls = this.classes.get(meta);
+        vals = this.readMembers(cls);
+        return this.store(oid, this.makeObj(cls.name, vals));
+      case 2: case 3: case 4: case 5:  // SystemClassWithMembers / ClassWithMembers (+ types)
+        cls = this.readClassInfo();
+        var types = null;
+        if (rt === 4 || rt === 5) types = this.readMemberTypes(cls.members);
+        if (rt === 3 || rt === 5) this.i32();  // libraryId
+        cls.types = types;
+        this.classes.set(cls.id, cls);
+        vals = this.readMembers(cls);
+        return this.store(cls.id, this.makeObj(cls.name, vals));
+      case 6:  // BinaryObjectString
+        oid = this.i32();
+        return this.store(oid, this.lengthStr());
+      case 7:  // BinaryArray
+        oid = this.i32();
+        atype = this.u8();
+        rank = this.i32();
+        lengths = [];
+        for (i = 0; i < rank; i++) lengths.push(this.i32());
+        if (atype === 3 || atype === 4 || atype === 5) for (i = 0; i < rank; i++) this.i32();
+        btype = this.u8();
+        info = this.readAdditional(btype);
+        n = 1;
+        for (i = 0; i < lengths.length; i++) n *= lengths[i];
+        arr = [];
+        this.store(oid, arr);
+        this.readElements(arr, n, btype, info);
+        return arr;
+      case 8:  // MemberPrimitiveTyped
+        t = this.u8();
+        return this.prim(t);
+      case 9:  // MemberReference
+        return { ref: this.i32() };
+      case 10:  // ObjectNull
+        return null;
+      case 11:  // MessageEnd
+        return "END";
+      case 12:  // BinaryLibrary
+        this.i32();
+        this.lengthStr();
+        return "LIB";
+      case 13:  // ObjectNullMultiple256
+        this.u8();
+        return { nulls: 1 };
+      case 14:  // ObjectNullMultiple
+        return { nulls: this.i32() };
+      case 15:  // ArraySinglePrimitive
+        oid = this.i32();
+        n = this.i32();
+        t = this.u8();
+        out = [];
+        for (i = 0; i < n; i++) out.push(this.prim(t));
+        return this.store(oid, out);
+      case 16: case 17:  // ArraySingleObject / ArraySingleString
+        oid = this.i32();
+        n = this.i32();
+        arr = [];
+        this.store(oid, arr);
+        this.readElements(arr, n, null, null);
+        return arr;
+      default:
+        throw new Error("unknown record type " + rt + " at byte " + (this.p - 1));
+    }
+  };
+
+  Reader.prototype.makeObj = function (name, vals) {
+    var o = { _class: name };
+    for (var k in vals) o[k] = vals[k];
+    return o;
+  };
+
+  Reader.prototype.readClassInfo = function () {
+    var id = this.i32();
+    var name = this.lengthStr();
+    var n = this.i32();
+    var members = [];
+    for (var i = 0; i < n; i++) members.push(this.lengthStr());
+    return { id: id, name: name, members: members };
+  };
+
+  Reader.prototype.readMemberTypes = function (members) {
+    var types = [], i;
+    for (i = 0; i < members.length; i++) types.push(this.u8());
+    var out = [];
+    for (i = 0; i < types.length; i++) out.push([types[i], this.readAdditional(types[i])]);
+    return out;
+  };
+
+  Reader.prototype.readAdditional = function (t) {
+    if (t === 0 || t === 7) return this.u8();
+    if (t === 3) return this.lengthStr();
+    if (t === 4) {
+      var n = this.lengthStr();
+      var lib = this.i32();
+      return [n, lib];
+    }
+    return null;
+  };
+
+  // The cell-tracing version of read_members: remembers where each cell's values sit.
+  Reader.prototype.readMembers = function (cls) {
+    var vals = {}, types = cls.types, i, m;
+    if (cls.name === CELL_CLASS) this.cells.push({});
+    for (i = 0; i < cls.members.length; i++) {
+      m = cls.members[i];
+      if (types) {
+        var bt = types[i][0], info = types[i][1];
+        if (bt === 0) {  // primitive member
+          var off = this.p;
+          var v = this.prim(info);
+          var entry = { off: off, code: info, val: v };
+          var last = this.cells.length ? this.cells[this.cells.length - 1] : null;
+          if (cls.name === CELL_CLASS && CELL_FIELDS.indexOf(m) >= 0) this.cells[this.cells.length - 1][m] = entry;
+          if (cls.name === TYPE_CLASS && m === "value__" && last) last.type = entry;
+          vals[m] = v;
+          continue;
+        }
+      }
+      vals[m] = this.readRecord();
+    }
+    return vals;
+  };
+
+  Reader.prototype.readElements = function (arr, n, btype, info) {
+    var i = 0;
+    while (i < n) {
+      if (btype === 0) {
+        arr.push(this.prim(info));
+        i++;
+        continue;
+      }
+      var rt = this.u[this.p];
+      if (rt === 13 || rt === 14) {
+        this.p++;
+        var cnt = rt === 13 ? this.u8() : this.i32();
+        for (var k = 0; k < cnt; k++) arr.push(null);
+        i += cnt;
+        continue;
+      }
+      arr.push(this.readRecord());
+      i++;
+    }
+  };
+
+  // Parse a world file. Returns { root, cells, objs }.
+  function parseWorld(buf) {
+    var r = new Reader(buf);
+    r.readHeader();
+    var root = null;
+    while (r.p < buf.byteLength && r.u[r.p] !== 11) {
+      var v = r.readRecord();
+      if (v && typeof v === "object" && v._class && root === null) root = v;
+    }
+    if (!root) throw new Error("no root object found in the file");
+    return { root: root, cells: r.cells, objs: r.objs };
+  }
+
+  function deref(parsed, v) {
+    if (v && typeof v === "object" && v.ref !== undefined) return parsed.objs.get(v.ref);
+    return v;
+  }
+
+  function gridInfo(parsed) {
+    var world = deref(parsed, parsed.root.WorldSaveData);
+    if (!world) throw new Error("save has no WorldSaveData");
+    return { W: world.gridWidth, H: world.gridHeight, count: parsed.cells.length };
+  }
+
+  function writeValue(dv, off, code, value) {
+    switch (code) {
+      case 1: dv.setUint8(off, value ? 1 : 0); break;
+      case 2: case 3: dv.setUint8(off, value); break;
+      case 6: dv.setFloat64(off, value, true); break;
+      case 7: dv.setInt16(off, value, true); break;
+      case 8: dv.setInt32(off, value, true); break;
+      case 9: case 12: case 13: dv.setBigInt64(off, BigInt(value), true); break;
+      case 10: dv.setInt8(off, value); break;
+      case 11: dv.setFloat32(off, value, true); break;
+      case 14: dv.setUint16(off, value, true); break;
+      case 15: dv.setUint32(off, value, true); break;
+      case 16: dv.setBigUint64(off, BigInt(value), true); break;
+      default: throw new Error("cannot write primitive type " + code);
+    }
+  }
+
+  // Check an edits object (the editor's cell_edits.json) against a parsed save.
+  function checkEdits(parsed, edits) {
+    var g = gridInfo(parsed);
+    if (!edits || !edits.changes || !Array.isArray(edits.changes)) throw new Error("not a cell_edits file");
+    if (edits.W !== g.W || edits.H !== g.H)
+      throw new Error("edits are for a " + edits.W + " x " + edits.H + " map, this save is " + g.W + " x " + g.H);
+    if (g.count !== g.W * g.H) throw new Error("cell records (" + g.count + ") do not match the grid");
+    return g;
+  }
+
+  // Apply edits to a copy of the world bytes. Returns { bytes, changed }.
+  function applyEdits(buf, parsed, edits) {
+    checkEdits(parsed, edits);
+    var out = buf.slice(0);
+    var dv = new DataView(out);
+    var cells = parsed.cells, changed = 0;
+    edits.changes.forEach(function (ch) {
+      var rec = cells[ch.index];
+      if (!rec) return;
+      var fields = { type: ch.type, fertile: ch.fertile, amount: ch.amount,
+                     saltWater: ch.saltWater, deepWater: ch.deepWater };
+      Object.keys(fields).forEach(function (f) {
+        var entry = f === "type" ? rec.type : rec[f];
+        writeValue(dv, entry.off, entry.code, fields[f]);
+      });
+      changed++;
+    });
+    return { bytes: out, changed: changed };
+  }
+
+  // Check that every edit reads back correctly from patched bytes.
+  function verify(buf, edits) {
+    var parsed = parseWorld(buf);
+    var bad = 0;
+    edits.changes.forEach(function (ch) {
+      var rec = parsed.cells[ch.index];
+      if (!rec || rec.type.val !== ch.type || rec.amount.val !== ch.amount) bad++;
+    });
+    return { bad: bad, total: edits.changes.length };
+  }
+
+  var api = {
+    parseWorld: parseWorld, gridInfo: gridInfo, checkEdits: checkEdits,
+    applyEdits: applyEdits, verify: verify
+  };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  root.KCPatch = api;
+})(typeof self !== "undefined" ? self : this);
+
+</script>
+<script>
+(function () {
+  var worldInput = document.getElementById("worldFile");
+  var editsInput = document.getElementById("editsFile");
+  var buildBtn = document.getElementById("build");
+  var dl = document.getElementById("download");
+  var status = document.getElementById("status");
+  var world = null, edits = null, outUrl = null;
+
+  function say(msg, cls) {
+    status.textContent = msg;
+    status.className = cls || "";
+  }
+
+  function refresh() {
+    buildBtn.disabled = !(world && edits);
+    dl.hidden = true;
+    if (outUrl) { URL.revokeObjectURL(outUrl); outUrl = null; }
+  }
+
+  worldInput.addEventListener("change", function () {
+    world = null; refresh();
+    var f = worldInput.files[0];
+    if (!f) return;
+    f.arrayBuffer().then(function (buf) {
+      try {
+        var parsed = KCPatch.parseWorld(buf);
+        var g = KCPatch.gridInfo(parsed);
+        world = { buf: buf, parsed: parsed, name: f.name };
+        say("World loaded: " + g.W + " x " + g.H + " map, " + g.count + " cells.", "");
+      } catch (e) {
+        say("Could not read that file as a save world: " + e.message, "bad");
+      }
+      refresh();
+    });
+  });
+
+  editsInput.addEventListener("change", function () {
+    edits = null; refresh();
+    var f = editsInput.files[0];
+    if (!f) return;
+    f.text().then(function (txt) {
+      try {
+        edits = JSON.parse(txt);
+        if (!edits.changes) throw new Error("no changes list");
+        say("Edits loaded: " + edits.changes.length + " cells, " + edits.W + " x " + edits.H + " map.", "");
+      } catch (e) {
+        say("That is not a cell_edits file: " + e.message, "bad");
+        edits = null;
+      }
+      refresh();
+    });
+  });
+
+  buildBtn.addEventListener("click", function () {
+    if (!world || !edits) return;
+    try {
+      KCPatch.checkEdits(world.parsed, edits);
+      var res = KCPatch.applyEdits(world.buf, world.parsed, edits);
+      var v = KCPatch.verify(res.bytes, edits);
+      if (v.bad) { say("Verification failed: " + v.bad + " of " + v.total + " cells did not read back. Nothing was downloaded.", "bad"); return; }
+      var blob = new Blob([res.bytes], { type: "application/octet-stream" });
+      outUrl = URL.createObjectURL(blob);
+      dl.href = outUrl;
+      dl.download = "world";
+      dl.hidden = false;
+      say("Patched " + res.changed + " cells. Verified: all " + v.total + " edits read back correctly.\nClick Download world to save it.", "ok");
+    } catch (e) {
+      say("Build failed: " + e.message, "bad");
+    }
+  });
+})();
+</script>
+</body>
+</html>
