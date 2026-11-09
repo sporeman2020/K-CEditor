@@ -909,6 +909,7 @@ function generateFertility(onlyCells) {
   }
   const F = new Float32Array(N);
   const newVal = new Map();
+  const treeP = new Map();
   const dirX = Math.cos(opts.angle), dirZ = Math.sin(opts.angle);
   for (let id = 0; id < comps.length; id++) {
     const L = comps[id];
@@ -968,14 +969,24 @@ function generateFertility(onlyCells) {
       if (blocked.has(c)) { newVal.set(c, 0); continue; }
       const r = F[c] / maxF;
       newVal.set(c, r < 0.34 ? 0 : r < 0.67 ? 1 : 2);
+      treeP.set(c, r);
     }
   }
+  // trees: more likely on richer soil, never on a structure's cell
+  const treeAmt = new Map();
+  treeP.forEach((r, c) => {
+    if (cells[c][0] !== 0 || bIndex.has(c)) return;
+    if (rnd() < 0.45 * r * r) treeAmt.set(c, 1 + Math.floor(rnd() * 3));
+  });
   // write the values, recording one stroke so Undo reverts the whole fill
   const stroke = [];
-  newVal.forEach((v, c) => {
-    if (cells[c][1] === v) return;
-    stroke.push([c, cells[c].slice()]);
-    cells[c][1] = v;
+  const touched = new Set([...newVal.keys(), ...treeAmt.keys()]);
+  touched.forEach(c => {
+    const before = cells[c].slice();
+    if (newVal.has(c)) cells[c][1] = newVal.get(c);
+    if (treeAmt.has(c)) cells[c][2] = treeAmt.get(c);
+    if (cells[c][1] === before[1] && cells[c][2] === before[2]) return;
+    stroke.push([c, before]);
     if (sameAsOriginal(c)) changed.delete(c); else changed.add(c);
     paintCell(c);
   });
