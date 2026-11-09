@@ -988,9 +988,9 @@ function outlineRect(r) {
 function drawOverlay() {
   og.clearRect(0, 0, ov.width, ov.height);
   if (showBuildings && BUILD.length) {          // structures as small gold dots
-    og.fillStyle = '#ffd24a'; og.strokeStyle = '#1a1a1a'; og.lineWidth = 1;
-    const r = Math.max(2, SIZE * 0.35);
-    BUILD.forEach(b => { og.beginPath(); og.arc(b[0] * SIZE, b[1] * SIZE, r, 0, Math.PI * 2); og.fill(); og.stroke(); });
+    og.fillStyle = '#ffd24a';
+    const s = Math.max(3, SIZE * 0.7), h = s / 2;     // yellow square centred on the structure
+    BUILD.forEach(b => og.fillRect(b[0] * SIZE - h, b[1] * SIZE - h, s, s));
   }
   if (copyMode === 'select' && selStart && selEnd) outlineRect(normRect(selStart, selEnd));
   else if (selRect) outlineRect(selRect);
