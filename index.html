@@ -576,15 +576,16 @@ function paintCell(i) {
     // base terrain, then a small square inside the cell for trees and rock
     g.fillStyle = t === 3 ? (d ? '#1d4a7a' : '#2f6fb0') : (t === 0 ? FERT_COLOUR[Math.min(2, f)] : '#8e9a72');
     g.fillRect(px, pz, SIZE, SIZE);
-    const rock = SIZE / 4, rockInset = (SIZE - rock) / 2;   // rock squares keep their size
     if (ROCK_TYPES.includes(t)) {
+      const rock = SIZE * 0.75, rin = (SIZE - rock) / 2;
       g.fillStyle = TYPE_COLOUR[t];
-      g.fillRect(px + rockInset, pz + rockInset, rock, rock);
+      g.fillRect(px + rin, pz + rin, rock, rock);
     } else if (a > 0) {
-      g.fillStyle = 'rgba(159,227,189,0.12)';     // very faint outline around the tree square
-      g.fillRect(px + 1, pz + 1, SIZE - 2, SIZE - 2);
+      const outer = SIZE * 0.4, oin = (SIZE - outer) / 2, inner = SIZE * 0.26, iin = (SIZE - inner) / 2;
+      g.fillStyle = 'rgba(159,227,189,0.7)';
+      g.fillRect(px + oin, pz + oin, outer, outer);
       g.fillStyle = '#0b3d1e';
-      g.fillRect(px + 2, pz + 2, SIZE - 4, SIZE - 4);
+      g.fillRect(px + iin, pz + iin, inner, inner);
     }
     return;
   }
