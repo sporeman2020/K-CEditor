@@ -36,6 +36,8 @@ td{padding:3px 4px;border-bottom:1px solid var(--line);font-variant-numeric:tabu
 td:first-child{color:var(--muted)}
 .note{font-size:12px;color:var(--muted);margin-top:6px}
 .row{display:flex;gap:6px;flex-wrap:wrap}
+.drop{border:2px dashed #3a4048;border-radius:8px;padding:16px 10px;text-align:center;color:var(--muted);font-size:13px;cursor:pointer;user-select:none}
+.drop.over{border-color:var(--accent);background:#2b3a34;color:var(--accent)}
 .tabs{display:flex;gap:4px}
 .tabs .tab{flex:1;background:#23272d;border-radius:6px 6px 0 0}
 .tabs .tab.on{background:var(--panel);color:var(--accent);border-bottom-color:var(--panel)}
@@ -147,7 +149,7 @@ td:first-child{color:var(--muted)}
     <div id="tab-save" hidden style="display:flex;flex-direction:column;gap:10px">
       <div class="card">
         <h2>1. Save world file</h2>
-        <input type="file" id="svWorld" style="width:100%">
+        <div class="drop" id="svWorldDrop">Drop the <code>world</code> file here, or click to choose<input type="file" id="svWorld" hidden></div>
         <div class="note" id="svWorldNote">Pick the save's <code>world</code> file (from Saves\&lt;save id&gt;).</div>
       </div>
       <div class="card">
@@ -156,7 +158,7 @@ td:first-child{color:var(--muted)}
           <button id="svUseCurrent">Use the edits on this map</button>
         </div>
         <div class="note">or pick a cell_edits.json file:</div>
-        <input type="file" id="svEdits" accept=".json,application/json" style="width:100%;margin-top:6px">
+        <div class="drop" id="svEditsDrop" style="margin-top:6px">Drop a cell_edits.json here, or click to choose<input type="file" id="svEdits" accept=".json,application/json" hidden></div>
         <div class="note" id="svEditsNote"></div>
       </div>
       <div class="card">
@@ -1173,6 +1175,26 @@ function svRefresh() {
   svDl.hidden = true;
   if (svUrl) { URL.revokeObjectURL(svUrl); svUrl = null; }
 }
+// drop zones: dropping a file hands it to the hidden file input, so the same loading code runs
+function wireDrop(zoneId, inputId) {
+  const zone = document.getElementById(zoneId), input = document.getElementById(inputId);
+  zone.addEventListener('click', () => input.click());
+  ['dragenter', 'dragover'].forEach(ev => zone.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation(); zone.classList.add('over');
+  }));
+  ['dragleave', 'dragend'].forEach(ev => zone.addEventListener(ev, () => zone.classList.remove('over')));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); e.stopPropagation(); zone.classList.remove('over');
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f) return;
+    const dt = new DataTransfer();
+    dt.items.add(f);
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change'));
+  });
+}
+wireDrop('svWorldDrop', 'svWorld');
+wireDrop('svEditsDrop', 'svEdits');
 document.getElementById('svWorld').addEventListener('change', async e => {
   svWorld = null; svRefresh();
   const f = e.target.files[0];
