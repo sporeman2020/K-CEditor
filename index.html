@@ -40,6 +40,11 @@ td:first-child{color:var(--muted)}
 .drop{border:2px dashed #3a4048;border-radius:8px;padding:16px 10px;text-align:center;color:var(--muted);font-size:13px;cursor:pointer;user-select:none}
 .drop.over{border-color:var(--accent);background:#2b3a34;color:var(--accent)}
 .saveRow{display:flex;align-items:center;gap:12px}
+.divider{width:24px;flex:none}
+header{justify-content:flex-start}
+header *{text-align:left}
+#count{margin-left:auto}
+header>div:not(.saveRow){text-align:left}
 #saveDrop{min-width:220px;padding:10px 12px}
 .saveName{font-weight:600;color:var(--accent);font-size:15px}
 .tabs{display:flex;gap:4px}
@@ -52,8 +57,9 @@ td:first-child{color:var(--muted)}
     <div class="drop" id="saveDrop" title="Drop a save folder, or its world file">Drop save folder or world file<input type="file" id="saveFile" hidden></div>
     <div id="saveName" class="saveName">Aalborg</div>
   </div>
+  <div class="divider"></div>
   <div>
-    <h1>Save cell editor</h1>
+    <h1>Kingdoms n Castles Cell Editor</h1>
     <div class="sub">Paint on the map, then download the changes. Edits are kept on this page only until you download them.</div>
   </div>
   <div class="sub" id="count">0 cells changed</div>
