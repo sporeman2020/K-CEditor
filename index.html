@@ -172,7 +172,10 @@ td:first-child{color:var(--muted)}
       </div>
       <div class="card">
         <h2>3. Build</h2>
-        <div class="row">
+        <label class="opt"><input type="checkbox" id="svBTOnly"> Map for BT data only</label>
+        <div class="drop" id="svSrcDrop" hidden style="margin-top:6px">Drop the source save folder (its BT data is copied)<input type="file" id="svSrc" hidden></div>
+        <div class="note" id="svSrcNote"></div>
+        <div class="row" style="margin-top:8px">
           <button id="svBuild" disabled>Build patched world</button>
           <a id="svDownload" hidden style="font-weight:600;color:var(--accent);align-self:center">Download world</a>
         </div>
@@ -212,6 +215,9 @@ td:first-child{color:var(--muted)}
     this.arrays = new Map();  // object id -> { off, n, t } for primitive arrays
     this.treeRef = null;      // object id the treeAmount member refers to
     this.inCellType = false;
+    this.kvps = [];           // key/value string pairs, with where each string sits in the file
+    this.kvpPending = null;
+    this.strSpans = new Map(); // string object id -> where its record sits in the file
     this.decoder = new TextDecoder("utf-8");
   }
 
@@ -287,6 +293,12 @@ td:first-child{color:var(--muted)}
         for (k = 0; k < rank; k++) n *= this.dv.getInt32(start + 10 + 4 * k, true);
         this.arrays.set(oid7, { off: p + 2, n: n, t: this.u[p + 1] });
       }
+    }
+    if (rt0 === 6) {
+      var oid6 = this.dv.getInt32(start + 1, true);
+      var v6 = this.readRecordBase();
+      this.strSpans.set(oid6, { start: start, end: this.p, rt: 6, value: v6 });
+      return v6;
     }
     return this.readRecordBase();
   };
@@ -420,6 +432,29 @@ td:first-child{color:var(--muted)}
           continue;
         }
       }
+      if (cls.name.indexOf("System.Collections.Generic.KeyValuePair") === 0 && (m === "key" || m === "value")) {
+        var s0 = this.p;
+        var sv = this.readRecord();
+        var span = { start: s0, end: this.p, rt: this.u[s0], value: sv };
+        var refSpan = null;
+        if (span.rt === 9 && sv && sv.ref !== undefined && this.strSpans.has(sv.ref)) {
+          refSpan = { start: s0, end: s0 + 5 };
+          var def = this.strSpans.get(sv.ref);
+          span = { start: def.start, end: def.end, rt: 6, value: def.value };
+        }
+        span.refSpan = refSpan;
+        if (!this.kvpPending) this.kvpPending = {};
+        this.kvpPending[m] = span;
+        vals[m] = sv;
+        if (m === "value") {
+          var pend = this.kvpPending;
+          if (pend.key && typeof pend.key.value === "string") {
+            this.kvps.push({ key: pend.key.value, value: pend.value.value, keySpan: pend.key, valueSpan: pend.value });
+          }
+          this.kvpPending = null;
+        }
+        continue;
+      }
       if (cls.name === CELL_CLASS && m === "type") {
         this.inCellType = true;
         vals[m] = this.readRecord();
@@ -470,7 +505,81 @@ td:first-child{color:var(--muted)}
     if (!root) throw new Error("no root object found in the file");
     var tree = r.arrays.get(r.treeRef);
     if (!tree || tree.t !== INT32) throw new Error("tree counts (treeAmount) not found in the file");
-    return { root: root, cells: r.cells, objs: r.objs, treeOff: tree.off, treeN: tree.n };
+    var maxId = 0;
+    r.objs.forEach(function (v, k) { if (k > maxId) maxId = k; });
+    r.classes.forEach(function (v, k) { if (k > maxId) maxId = k; });
+    return { root: root, cells: r.cells, objs: r.objs, treeOff: tree.off, treeN: tree.n, kvps: r.kvps, bytes: buf, maxId: maxId };
+  }
+
+  function isBT(key) { return typeof key === "string" && key.indexOf("BetterTomorrows") === 0; }
+
+  function stringRecord(oid, text) {
+    var enc = new TextEncoder().encode(text), len = [], n = enc.length;
+    do {
+      var b = n & 0x7f;
+      n >>>= 7;
+      if (n) b |= 0x80;
+      len.push(b);
+    } while (n);
+    var out = new Uint8Array(1 + 4 + len.length + enc.length);
+    out[0] = 6;
+    out.set(oid, 1);
+    out.set(len, 5);
+    out.set(enc, 5 + len.length);
+    return out;
+  }
+
+  // Copy the Better Tomorrows values from the source save into the target save, for keys both have.
+  function applyBT(targetParsed, sourceParsed) {
+    var buf = targetParsed.bytes;
+    var src = new Map();
+    sourceParsed.kvps.forEach(function (kv) { if (isBT(kv.key)) src.set(kv.key, kv.value); });
+    var splices = [], replaced = 0, skipped = 0, found = new Set(), writtenVal = new Map(), nextId = targetParsed.maxId;
+    var groups = new Map();
+    targetParsed.kvps.forEach(function (kv) {
+      if (!isBT(kv.key) || !src.has(kv.key)) return;
+      found.add(kv.key);
+      var s = kv.valueSpan.start;
+      if (!groups.has(s)) groups.set(s, []);
+      groups.get(s).push(kv);
+    });
+    var bytesNow = new Uint8Array(buf);
+    groups.forEach(function (list, s) {
+      var span = list[0].valueSpan, current = list[0].value;
+      if (span.rt !== 6) { skipped += list.length; return; }
+      var agree = list.every(function (kv) { return src.get(kv.key) === src.get(list[0].key); });
+      if (agree) {
+        var v = src.get(list[0].key);
+        if (v !== current) {
+          splices.push({ start: s, end: span.end, bytes: stringRecord(bytesNow.slice(s + 1, s + 5), v) });
+          replaced++;
+        }
+        return;
+      }
+      list.forEach(function (kv) {
+        var v = src.get(kv.key);
+        if (v === current) return;
+        if (!kv.valueSpan.refSpan) { skipped++; return; }
+        nextId++;
+        var newOid = new Uint8Array(4);
+        new DataView(newOid.buffer).setInt32(0, nextId, true);
+        splices.push({ start: kv.valueSpan.refSpan.start, end: kv.valueSpan.refSpan.end, bytes: stringRecord(newOid, v) });
+        replaced++;
+      });
+    });
+    var missing = 0;
+    src.forEach(function (v, k) { if (!found.has(k)) missing++; });
+    splices.sort(function (a, b) { return b.start - a.start; });
+    var parts = [], pos = new Uint8Array(buf), at = pos.length;
+    splices.forEach(function (s) {
+      parts.unshift(pos.subarray(s.end, at));
+      parts.unshift(s.bytes);
+      at = s.start;
+    });
+    parts.unshift(pos.subarray(0, at));
+    var total = parts.reduce(function (n, p) { return n + p.length; }, 0), out = new Uint8Array(total), o = 0;
+    parts.forEach(function (p) { out.set(p, o); o += p.length; });
+    return { bytes: out.buffer, replaced: replaced, skipped: skipped, missing: missing };
   }
 
   function deref(parsed, v) {
@@ -544,7 +653,7 @@ td:first-child{color:var(--muted)}
 
   var api = {
     parseWorld: parseWorld, gridInfo: gridInfo, checkEdits: checkEdits,
-    applyEdits: applyEdits, verify: verify
+    applyEdits: applyEdits, verify: verify, applyBT: applyBT
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.KCPatch = api;
@@ -630,7 +739,7 @@ function paintCell(i) {
       g.fillStyle = TYPE_COLOUR[t];
       g.fillRect(px + rin, pz + rin, rock, rock);
     } else if (a > 0) {
-      const outer = SIZE * 0.4, oin = (SIZE - outer) / 2, inner = SIZE * 0.26, iin = (SIZE - inner) / 2;
+      const outer = SIZE * 0.64, oin = (SIZE - outer) / 2, inner = SIZE * 0.42, iin = (SIZE - inner) / 2;
       g.fillStyle = 'rgba(159,227,189,0.7)';
       g.fillRect(px + oin, pz + oin, outer, outer);
       g.fillStyle = '#0b3d1e';
@@ -1379,7 +1488,7 @@ const svBuild = document.getElementById('svBuild'), svDl = document.getElementBy
 const svEditsNote = document.getElementById('svEditsNote');
 function svSay(msg, bad) { svStatus.textContent = msg; svStatus.style.color = bad ? '#ff8a7d' : ''; }
 function svRefresh() {
-  svBuild.disabled = !(svWorld && svEdits);
+  svBuild.disabled = !(svWorld && (document.getElementById('svBTOnly').checked ? svSource : svEdits));
   svDl.hidden = true;
   if (svUrl) { URL.revokeObjectURL(svUrl); svUrl = null; }
 }
@@ -1436,7 +1545,54 @@ document.getElementById('svUseCurrent').addEventListener('click', () => {
   svEdits = currentEdits(); svRefresh();
   svEditsNote.textContent = svEdits.changes.length + ' cells edited on this map.';
 });
+let svSource = null;
+const svSrcDrop = document.getElementById('svSrcDrop'), svSrcInput = document.getElementById('svSrc'), svSrcNote = document.getElementById('svSrcNote');
+function setSource(buf, name) {
+  try {
+    svSource = { parsed: KCPatch.parseWorld(buf) };
+    svSrcNote.textContent = 'BT source: ' + name;
+  } catch (err) {
+    svSource = null;
+    svSrcNote.textContent = 'Not a readable save: ' + err.message;
+  }
+  svRefresh();
+}
+svSrcDrop.addEventListener('click', () => svSrcInput.click());
+svSrcInput.addEventListener('change', async () => {
+  const f = svSrcInput.files[0];
+  if (f) setSource(await f.arrayBuffer(), f.name);
+});
+['dragenter', 'dragover'].forEach(ev => svSrcDrop.addEventListener(ev, e => { e.preventDefault(); svSrcDrop.classList.add('over'); }));
+['dragleave', 'dragend'].forEach(ev => svSrcDrop.addEventListener(ev, () => svSrcDrop.classList.remove('over')));
+svSrcDrop.addEventListener('drop', async e => {
+  e.preventDefault(); svSrcDrop.classList.remove('over');
+  const ents = [...e.dataTransfer.items].map(it => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+  const dir = ents.find(en => en.isDirectory);
+  try {
+    if (dir) {
+      const files = await readEntries(dir);
+      const w = files.find(en => en.isFile && en.name === 'world');
+      if (!w) throw new Error('no world file in that folder');
+      setSource(await (await fileFromEntry(w)).arrayBuffer(), dir.name);
+    } else {
+      const f = e.dataTransfer.files[0];
+      if (f) setSource(await f.arrayBuffer(), f.name);
+    }
+  } catch (err) { svSrcNote.textContent = 'Could not read that source: ' + err.message; }
+});
+document.getElementById('svBTOnly').addEventListener('change', e => { svSrcDrop.hidden = !e.target.checked; svRefresh(); });
+function buildBT() {
+  if (!svWorld) { svSay('Load a world file first.', true); return; }
+  if (!svSource) { svSay('Drop a source save for the BT data.', true); return; }
+  try {
+    const res = KCPatch.applyBT(svWorld.parsed, svSource.parsed);
+    svUrl = URL.createObjectURL(new Blob([res.bytes], { type: 'application/octet-stream' }));
+    svDl.href = svUrl; svDl.download = 'world'; svDl.hidden = false;
+    svSay('BT data copied: ' + res.replaced + ' entries updated, ' + res.skipped + ' skipped, ' + res.missing + ' not in the source. Click Download world.');
+  } catch (err) { svSay('BT copy failed: ' + err.message, true); }
+}
 svBuild.addEventListener('click', () => {
+  if (document.getElementById('svBTOnly').checked) { buildBT(); return; }
   if (!svWorld || !svEdits) return;
   try {
     KCPatch.checkEdits(svWorld.parsed, svEdits);
