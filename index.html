@@ -160,11 +160,6 @@ td:first-child{color:var(--muted)}
       <div class="card">
         <h2>1. Save world file</h2>
         <label class="opt"><input type="checkbox" id="svBlank"> Use a blank base instead of a save</label>
-        <select id="svBaseSize" hidden style="margin:6px 0;width:100%">
-          <option value="225">225 (official max)</option>
-          <option value="300">300 (Betalands 1.8)</option>
-          <option value="232">232 (Longvale)</option>
-        </select>
         <div class="drop" id="svWorldDrop">Drop the <code>world</code> file here, or click to choose<input type="file" id="svWorld" hidden></div>
         <div class="note" id="svWorldNote">Pick the save's <code>world</code> file (from Saves\&lt;save id&gt;).</div>
       </div>
@@ -1588,7 +1583,6 @@ svSrcDrop.addEventListener('drop', async e => {
   } catch (err) { svSrcNote.textContent = 'Could not read that source: ' + err.message; }
 });
 document.getElementById('svBTOnly').addEventListener('change', e => { svSrcDrop.hidden = !e.target.checked; svRefresh(); });
-document.getElementById('svBlank').addEventListener('change', e => { document.getElementById('svBaseSize').hidden = !e.target.checked; });
 function buildBT() {
   if (!svWorld) { svSay('Load a world file first.', true); return; }
   if (!svSource) { svSay('Drop a source save for the BT data.', true); return; }
@@ -1604,11 +1598,6 @@ svBuild.addEventListener('click', () => {
   if (!svWorld || !svEdits) return;
   try {
     KCPatch.checkEdits(svWorld.parsed, svEdits);
-    if (document.getElementById('svBlank').checked) {
-      const want = parseInt(document.getElementById('svBaseSize').value, 10);
-      const have = KCPatch.gridInfo(svWorld.parsed).W;
-      if (have !== want) throw new Error('blank base is ' + have + ' but ' + want + ' was selected');
-    }
     const res = KCPatch.applyEdits(svWorld.buf, svWorld.parsed, svEdits);
     const v = KCPatch.verify(res.bytes, svEdits);
     if (v.bad) { svSay('Verification failed: ' + v.bad + ' of ' + v.total + ' cells did not read back. Nothing was downloaded.', true); return; }
