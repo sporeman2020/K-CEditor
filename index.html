@@ -127,10 +127,6 @@ td:first-child{color:var(--muted)}
         <button data-size="300">300 (Betalands 1.8)</button>
         <button data-size="232">232 (Longvale)</button>
       </div>
-      <div class="row">
-        <input id="bw" type="number" value="225" min="10" max="400" style="width:72px;background:#2a2f36;color:#e8e6e0;border:1px solid #3a4048;border-radius:4px;padding:5px">
-        <input id="bh" type="number" value="225" min="10" max="400" style="width:72px;background:#2a2f36;color:#e8e6e0;border:1px solid #3a4048;border-radius:4px;padding:5px">
-      </div>
       <div class="row" style="margin-top:8px"><button id="newblank">New blank map</button></div>
       <div class="note">Fills the map with deep water to paste onto. The copied block is kept.</div>
     </div>
@@ -160,6 +156,11 @@ td:first-child{color:var(--muted)}
       <div class="card">
         <h2>1. Save world file</h2>
         <label class="opt"><input type="checkbox" id="svBlank"> Use a blank base instead of a save</label>
+        <select id="svBaseSize" hidden style="margin:6px 0;width:100%">
+          <option value="225">225 (official max)</option>
+          <option value="300">300 (Betalands 1.8)</option>
+          <option value="232">232 (Longvale)</option>
+        </select>
         <div class="drop" id="svWorldDrop">Drop the <code>world</code> file here, or click to choose<input type="file" id="svWorld" hidden></div>
         <div class="note" id="svWorldNote">Pick the save's <code>world</code> file (from Saves\&lt;save id&gt;).</div>
       </div>
@@ -1430,14 +1431,13 @@ function restoreClip() { try { const s = localStorage.getItem('kcClip'); if (s) 
 document.getElementById('showb').addEventListener('change', e => { showBuildings = e.target.checked; drawOverlay(); });
 document.getElementById('newblank').addEventListener('click', () => {
   if (changed.size && !confirm('Start a blank map? Unsaved edits on this map will be discarded. The copied block is kept.')) return;
-  const w = Math.min(400, Math.max(10, parseInt(document.getElementById('bw').value, 10) || 225));
-  const h = Math.min(400, Math.max(10, parseInt(document.getElementById('bh').value, 10) || 225));
+  const w = blankSize, h = blankSize;
   loadGrid(w, h, blankCells(w, h), []);
   copyNote.textContent = 'Blank ' + w + ' x ' + h + ' map ready.' + (clip ? ' Your copied block is still available.' : '');
 });
+let blankSize = 225;
 document.querySelectorAll('[data-size]').forEach(btn => btn.addEventListener('click', () => {
-  document.getElementById('bw').value = btn.dataset.size;
-  document.getElementById('bh').value = btn.dataset.size;
+  blankSize = parseInt(btn.dataset.size, 10);
 }));
 // ---- zoom and pan: the map is shown inside a clipped frame; zoom buttons and W A S D move it ----
 let zoom = 1, panX = 0, panY = 0;
@@ -1583,6 +1583,7 @@ svSrcDrop.addEventListener('drop', async e => {
   } catch (err) { svSrcNote.textContent = 'Could not read that source: ' + err.message; }
 });
 document.getElementById('svBTOnly').addEventListener('change', e => { svSrcDrop.hidden = !e.target.checked; svRefresh(); });
+document.getElementById('svBlank').addEventListener('change', e => { document.getElementById('svBaseSize').hidden = !e.target.checked; });
 function buildBT() {
   if (!svWorld) { svSay('Load a world file first.', true); return; }
   if (!svSource) { svSay('Drop a source save for the BT data.', true); return; }
@@ -1598,6 +1599,11 @@ svBuild.addEventListener('click', () => {
   if (!svWorld || !svEdits) return;
   try {
     KCPatch.checkEdits(svWorld.parsed, svEdits);
+    if (document.getElementById('svBlank').checked) {
+      const want = parseInt(document.getElementById('svBaseSize').value, 10);
+      const have = KCPatch.gridInfo(svWorld.parsed).W;
+      if (have !== want) throw new Error('blank base is ' + have + ' but ' + want + ' was selected');
+    }
     const res = KCPatch.applyEdits(svWorld.buf, svWorld.parsed, svEdits);
     const v = KCPatch.verify(res.bytes, svEdits);
     if (v.bad) { svSay('Verification failed: ' + v.bad + ' of ' + v.total + ' cells did not read back. Nothing was downloaded.', true); return; }
