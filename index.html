@@ -99,6 +99,8 @@ td:first-child{color:var(--muted)}
       <input type="range" id="den" min="0.01" max="0.12" step="0.01" value="0.04">
       <label class="sub">Blend passes <span id="blv">2</span></label>
       <input type="range" id="blur" min="0" max="5" value="2">
+      <label class="sub">Forest blend passes <span id="fblv">2</span></label>
+      <input type="range" id="fblur" min="0" max="5" value="2">
       <label class="sub">Coast band (cells) <span id="bandv">3</span></label>
       <input type="range" id="band" min="1" max="6" value="3">
       <label class="sub">Coast facing the direction</label>
@@ -880,6 +882,7 @@ function generateFertility(onlyCells) {
     angle: parseFloat(document.getElementById('ang').value) * Math.PI / 180,
     density: parseFloat(document.getElementById('den').value),
     blur: parseInt(document.getElementById('blur').value, 10),
+    fblur: parseInt(document.getElementById('fblur').value, 10),
     band: parseInt(document.getElementById('band').value, 10),
     coast: document.getElementById('coastmode').value,
     seed: parseInt(document.getElementById('seed').value, 10) || 1
@@ -987,6 +990,40 @@ function generateFertility(onlyCells) {
     const c = rq[h];
     for (const n of neighbours(c)) if (rockDist[n] > rockDist[c] + 1) { rockDist[n] = rockDist[c] + 1; rq.push(n); }
   }
+  // forests: random patches of tree density over the dry land, blended so groups merge into forests
+  const cand = [...treeP.keys()].filter(c => cells[c][0] === 0 && !bIndex.has(c));
+  const TF = new Float32Array(N);
+  const patches = Math.max(1, Math.round(cand.length / 60));
+  for (let b = 0; b < patches && cand.length; b++) {
+    const centre = cand[Math.floor(rnd() * cand.length)];
+    const sig = 2 + 2 * rnd(), R = Math.ceil(3 * sig);
+    const cx = centre % W, cz = (centre - cx) / W;
+    for (let dz = -R; dz <= R; dz++) for (let dx = -R; dx <= R; dx++) {
+      const x = cx + dx, z = cz + dz;
+      if (x < 0 || z < 0 || x >= W || z >= H) continue;
+      const n = z * W + x;
+      if (cells[n][0] !== 0) continue;
+      TF[n] += Math.exp(-(dx * dx + dz * dz) / (2 * sig * sig));
+    }
+  }
+  for (let p = 0; p < opts.fblur; p++) {
+    const G = cand.map(c => {
+      const x = c % W, z = (c - x) / W;
+      let s = 0, k = 0;
+      for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx, zz = z + dz;
+        if (xx < 0 || zz < 0 || xx >= W || zz >= H) continue;
+        const n = zz * W + xx;
+        if (cells[n][0] !== 0) continue;
+        s += TF[n]; k++;
+      }
+      return s / k;
+    });
+    cand.forEach((c, k) => { TF[c] = G[k]; });
+  }
+  let maxTF = 0;
+  for (const c of cand) maxTF = Math.max(maxTF, TF[c]);
+  if (maxTF <= 0) maxTF = 1;
   const treeAmt = new Map();
   treeP.forEach((r, c) => {
     if (cells[c][0] !== 0 || bIndex.has(c)) return;
@@ -994,7 +1031,8 @@ function generateFertility(onlyCells) {
     const water = 0.3 + 0.7 * Math.exp(-dist[c] / 5);
     const soil = f === 2 ? 1 : f === 1 ? 0.75 : 0.5;
     const nearRock = Math.exp(-rockDist[c] / 3);
-    if (rnd() < Math.min(0.95, 0.5 * water * soil * (1 + 1.5 * nearRock))) {
+    const forest = 0.1 + 0.9 * (TF[c] / maxTF);
+    if (rnd() < Math.min(0.95, 0.5 * water * soil * (1 + 1.5 * nearRock) * forest)) {
       const amt = 1 + Math.floor(rnd() * 3) + (nearRock > 0.4 ? Math.floor(nearRock * 2) : 0);
       treeAmt.set(c, Math.min(5, amt));
     }
@@ -1028,7 +1066,7 @@ window.addEventListener('keydown', e => {
   if (pickMode) setPickMode(false);
   if (copyMode) setCopyMode(null);
 });
-[['ang', 'angv', v => v], ['den', 'denv', v => v], ['blur', 'blv', v => v], ['band', 'bandv', v => v]].forEach(([id, lab, f]) => {
+[['ang', 'angv', v => v], ['den', 'denv', v => v], ['blur', 'blv', v => v], ['fblur', 'fblv', v => v], ['band', 'bandv', v => v]].forEach(([id, lab, f]) => {
   const el = document.getElementById(id);
   el.addEventListener('input', () => { document.getElementById(lab).textContent = f(el.value); });
 });
