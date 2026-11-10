@@ -981,13 +981,23 @@ function generateFertility(onlyCells) {
     }
   }
   // trees: roots reach groundwater, so they are likelier near water and on richer soil; never on a structure's cell
+  const rockDist = new Float32Array(N).fill(1e9), rq = [];
+  for (let i = 0; i < N; i++) if (ROCK_TYPES.includes(cells[i][0])) { rockDist[i] = 0; rq.push(i); }
+  for (let h = 0; h < rq.length; h++) {
+    const c = rq[h];
+    for (const n of neighbours(c)) if (rockDist[n] > rockDist[c] + 1) { rockDist[n] = rockDist[c] + 1; rq.push(n); }
+  }
   const treeAmt = new Map();
   treeP.forEach((r, c) => {
     if (cells[c][0] !== 0 || bIndex.has(c)) return;
     const f = newVal.has(c) ? newVal.get(c) : cells[c][1];
     const water = 0.3 + 0.7 * Math.exp(-dist[c] / 5);
     const soil = f === 2 ? 1 : f === 1 ? 0.75 : 0.5;
-    if (rnd() < 0.5 * water * soil) treeAmt.set(c, 1 + Math.floor(rnd() * 3));
+    const nearRock = Math.exp(-rockDist[c] / 3);
+    if (rnd() < Math.min(0.95, 0.5 * water * soil * (1 + 1.5 * nearRock))) {
+      const amt = 1 + Math.floor(rnd() * 3) + (nearRock > 0.4 ? Math.floor(nearRock * 2) : 0);
+      treeAmt.set(c, Math.min(5, amt));
+    }
   });
   // write the values, recording one stroke so Undo reverts the whole fill
   const stroke = [];
