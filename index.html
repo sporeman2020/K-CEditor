@@ -126,6 +126,11 @@ td:first-child{color:var(--muted)}
         <button data-size="225">225 (official max)</button>
         <button data-size="300">300 (Betalands 1.8)</button>
       </div>
+      <div class="row">
+        <input id="bw" type="number" value="225" min="10" max="400" style="width:72px;background:#2a2f36;color:#e8e6e0;border:1px solid #3a4048;border-radius:4px;padding:5px">
+        <input id="bh" type="number" value="225" min="10" max="400" style="width:72px;background:#2a2f36;color:#e8e6e0;border:1px solid #3a4048;border-radius:4px;padding:5px">
+      </div>
+      <div class="note" id="sizeWarn" hidden style="color:#ff8a7d">Maps larger than 300 will not load in a save.</div>
       <div class="row" style="margin-top:8px"><button id="newblank">New blank map</button></div>
       <div class="note">Fills the map with deep water to paste onto. The copied block is kept.</div>
     </div>
@@ -1429,13 +1434,17 @@ function restoreClip() { try { const s = localStorage.getItem('kcClip'); if (s) 
 document.getElementById('showb').addEventListener('change', e => { showBuildings = e.target.checked; drawOverlay(); });
 document.getElementById('newblank').addEventListener('click', () => {
   if (changed.size && !confirm('Start a blank map? Unsaved edits on this map will be discarded. The copied block is kept.')) return;
-  const w = blankSize, h = blankSize;
+  const w = Math.min(400, Math.max(10, parseInt(bwIn.value, 10) || 225));
+  const h = Math.min(400, Math.max(10, parseInt(bhIn.value, 10) || 225));
   loadGrid(w, h, blankCells(w, h), []);
   copyNote.textContent = 'Blank ' + w + ' x ' + h + ' map ready.' + (clip ? ' Your copied block is still available.' : '');
 });
-let blankSize = 225;
+const bwIn = document.getElementById('bw'), bhIn = document.getElementById('bh'), sizeWarn = document.getElementById('sizeWarn');
+function syncSizeWarn() { sizeWarn.hidden = !(parseInt(bwIn.value, 10) > 300 || parseInt(bhIn.value, 10) > 300); }
+bwIn.addEventListener('input', syncSizeWarn);
+bhIn.addEventListener('input', syncSizeWarn);
 document.querySelectorAll('[data-size]').forEach(btn => btn.addEventListener('click', () => {
-  blankSize = parseInt(btn.dataset.size, 10);
+  bwIn.value = btn.dataset.size; bhIn.value = btn.dataset.size; syncSizeWarn();
 }));
 // ---- zoom and pan: the map is shown inside a clipped frame; zoom buttons and W A S D move it ----
 let zoom = 1, panX = 0, panY = 0;
