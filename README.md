@@ -10,4 +10,8 @@ Nothing is uploaded. The page runs entirely in your browser.
 
 To use the result, make a new save folder, copy `summary`, `cover` and `custombanner.png` from the original save into it, and save the download there as `world` with no extension.
 
+Support for BT data included, and New Houses/BT Structures.
+
+Access via kceditor.soilguessr.com
+
 All rights reserved. See LICENSE.txt.
