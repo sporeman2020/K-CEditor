@@ -12,6 +12,6 @@ To use the result, make a new save folder, copy `summary`, `cover` and `customba
 
 Support for BT data included, and New Houses/BT Structures.
 
-Access via kceditor.soilguessr.com
+Access via `kceditor.soilguessr.com`
 
 All rights reserved. See LICENSE.txt.
