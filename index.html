@@ -1,6 +1,6 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Save cell editor</title>
+<title>Kingdoms n Castles Cell Editor</title>
 <link rel="icon" type="image/png" href="favicon.png">
 <style>
 :root{--bg:#15171b;--fg:#e8e6e0;--muted:#9a9890;--panel:#1e2227;--line:#2a2e35;--accent:#8fd0b0}
@@ -16,6 +16,7 @@ main{display:flex;justify-content:center;padding:16px 316px 16px 16px}
 #ov{pointer-events:none}
 #zoombar{position:absolute;right:16px;bottom:16px;display:flex;gap:6px;z-index:3}
 #zoombar button{width:34px;height:34px;font-size:18px;line-height:1;padding:0}
+#coord{align-self:center;min-width:64px;text-align:center;font-variant-numeric:tabular-nums;background:var(--panel);border-radius:4px;padding:8px 6px;box-sizing:border-box}
 #toggle{position:fixed;top:64px;right:16px;z-index:3}
 #panel{position:fixed;top:104px;right:16px;width:280px;max-height:calc(100vh - 120px);overflow:auto;background:rgba(30,34,39,0.94);border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:10px;z-index:2;box-sizing:border-box}
 #panel .card{padding:10px 12px}
@@ -65,7 +66,7 @@ header>div:not(.saveRow){text-align:left}
   <div class="sub" id="count">0 cells changed</div>
 </header>
 <main>
-  <div id="view"><div id="stage"><canvas id="c"></canvas><canvas id="ov"></canvas></div><div id="zoombar"><button id="zout" title="Zoom out">&minus;</button><button id="zin" title="Zoom in">+</button></div><button id="toggle">Hide tools</button>
+  <div id="view"><div id="stage"><canvas id="c"></canvas><canvas id="ov"></canvas></div><div id="zoombar"><span id="coord" class="sub">[&ndash;, &ndash;]</span><button id="zout" title="Zoom out">&minus;</button><button id="zin" title="Zoom in">+</button></div><button id="toggle">Hide tools</button>
   <aside id="panel">
     <div class="tabs">
       <button id="tabEd" class="tab on">Cell editor</button>
@@ -187,6 +188,9 @@ header>div:not(.saveRow){text-align:left}
         <label class="opt"><input type="checkbox" id="svBTOnly"> Map for BT data only</label>
         <div class="drop" id="svSrcDrop" hidden style="margin-top:6px">Drop the source save folder (its BT data is copied)<input type="file" id="svSrc" hidden></div>
         <div class="note" id="svSrcNote"></div>
+        <label class="opt" style="margin-top:8px"><input type="checkbox" id="svCopyStructs"> Copy structures (buildings) from a source save</label>
+        <div class="drop" id="svStructDrop" hidden style="margin-top:6px">Drop the source save folder (its buildings are copied)<input type="file" id="svStruct" hidden></div>
+        <div class="note" id="svStructNote"></div>
         <div class="row" style="margin-top:8px">
           <button id="svBuild" disabled>Build patched world</button>
           <a id="svDownload" hidden style="font-weight:600;color:var(--accent);align-self:center">Download world</a>
@@ -663,9 +667,175 @@ header>div:not(.saveRow){text-align:left}
     return { bad: bad, total: edits.changes.length };
   }
 
+  // ---- structures: copy the buildings list from a source save into a target save ----
+  // Records every object's byte span and every id reference, so the buildings' dependencies can be
+  // copied with fresh ids. The target's own structures list is replaced; everything else is kept.
+  var DEF_TYPES = [1, 2, 3, 4, 5, 6, 7, 15, 16, 17];
+
+  function TraceReader(buf) {
+    Reader.call(this, buf);
+    this.defs = new Map();   // object id -> { start, end, rt }
+    this.refs = [];          // [byte position of an id field, id]
+  }
+  TraceReader.prototype = Object.create(Reader.prototype);
+  TraceReader.prototype.constructor = TraceReader;
+  TraceReader.prototype.readRecord = function () {
+    var start = this.p, rt = this.u[start];
+    if (rt === 9) this.refs.push([start + 1, this.dv.getInt32(start + 1, true)]);
+    else if (rt === 1) this.refs.push([start + 5, this.dv.getInt32(start + 5, true)]);
+    var v = Reader.prototype.readRecord.call(this);
+    if (DEF_TYPES.indexOf(rt) >= 0) {
+      var oid = this.dv.getInt32(start + 1, true);
+      if (!this.defs.has(oid)) this.defs.set(oid, { start: start, end: this.p, rt: rt });
+    }
+    return v;
+  };
+
+  function traceWorld(buf) {
+    var r = new TraceReader(buf);
+    r.readHeader();
+    var root = null;
+    while (r.p < buf.byteLength && r.u[r.p] !== 11) {
+      var v = r.readRecord();
+      if (v && typeof v === "object" && v._class && root === null) root = v;
+    }
+    r.root = root;
+    r.end = r.p;
+    return r;
+  }
+
+  // First index in a sorted numeric array with value >= x.
+  function lowerBound(arr, x) {
+    var lo = 0, hi = arr.length;
+    while (lo < hi) {
+      var m = (lo + hi) >> 1;
+      if (arr[m] < x) lo = m + 1; else hi = m;
+    }
+    return lo;
+  }
+
+  // Index of everything a trace knows, sorted so spans can be searched quickly.
+  function indexTrace(t) {
+    var refs = t.refs.slice().sort(function (a, b) { return a[0] - b[0]; });
+    var starts = [];
+    t.defs.forEach(function (d, oid) { starts.push([d.start, oid]); });
+    starts.sort(function (a, b) { return a[0] - b[0]; });
+    return {
+      refs: refs, rpos: refs.map(function (r) { return r[0]; }),
+      starts: starts, spos: starts.map(function (s) { return s[0]; })
+    };
+  }
+
+  // Every object id the given roots need: their references, and the definitions nested in them.
+  function copyClosure(t, ix, roots) {
+    var seen = new Set(), stack = roots.slice(), k;
+    while (stack.length) {
+      var oid = stack.pop();
+      if (seen.has(oid)) continue;
+      seen.add(oid);
+      var d = t.defs.get(oid);
+      if (!d) throw new Error("object " + oid + " is referenced but not defined in its save");
+      var lo = lowerBound(ix.rpos, d.start), hi = lowerBound(ix.rpos, d.end);
+      for (k = lo; k < hi; k++) if (!seen.has(ix.refs[k][1])) stack.push(ix.refs[k][1]);
+      lo = lowerBound(ix.spos, d.start); hi = lowerBound(ix.spos, d.end);
+      for (k = lo; k < hi; k++) if (!seen.has(ix.starts[k][1])) stack.push(ix.starts[k][1]);
+    }
+    return seen;
+  }
+
+  // The outermost of the given objects: any object nested inside another one is left out, since
+  // copying its parent already copies it.
+  function outerSpans(t, ids) {
+    var list = [];
+    ids.forEach(function (oid) { var d = t.defs.get(oid); list.push({ start: d.start, end: d.end, oid: oid }); });
+    list.sort(function (a, b) { return a.start - b.start; });
+    var out = [], last = -1;
+    list.forEach(function (s) { if (s.start >= last) { out.push(s); last = s.end; } });
+    return out;
+  }
+
+  // Copy one span of source bytes, giving every id in it its new value.
+  function copySpan(u, ix, span, newid) {
+    var out = u.slice(span.start, span.end), dv = new DataView(out.buffer), k;
+    function fresh(oid) {
+      var n = newid.get(oid);
+      if (n === undefined) throw new Error("object " + oid + " was not mapped for copying");
+      return n;
+    }
+    var lo = lowerBound(ix.rpos, span.start), hi = lowerBound(ix.rpos, span.end);
+    for (k = lo; k < hi; k++) {
+      var r = ix.refs[k];
+      dv.setInt32(r[0] - span.start, fresh(r[1]), true);
+    }
+    lo = lowerBound(ix.spos, span.start); hi = lowerBound(ix.spos, span.end);
+    for (k = lo; k < hi; k++) {
+      var oid = ix.starts[k][1];
+      dv.setInt32(ix.starts[k][0] + 1 - span.start, fresh(oid), true);
+    }
+    return out;
+  }
+
+  // Follow a reference to the object it names (the whole file is read by the time this runs).
+  function resolveRef(r, v) {
+    for (var n = 0; n < 8 && v && typeof v === "object" && v.ref !== undefined; n++) v = r.objs.get(v.ref);
+    return v;
+  }
+
+  // The object id of a member that holds a reference, e.g. PlayerSaveData.structures.
+  function refId(v, what) {
+    if (!v || typeof v !== "object" || v.ref === undefined) throw new Error(what + " is not a saved reference");
+    return v.ref;
+  }
+
+  // Copy the structures list (every building) from the source save into the target save.
+  // Returns { bytes, objects, bytesCopied }.
+  function copyStructures(targetBuf, sourceBuf) {
+    var tr = traceWorld(targetBuf), sr = traceWorld(sourceBuf);
+    var tPlayer = resolveRef(tr, tr.root && tr.root.PlayerSaveData);
+    var sPlayer = resolveRef(sr, sr.root && sr.root.PlayerSaveData);
+    if (!tPlayer || !sPlayer) throw new Error("save has no PlayerSaveData");
+    var tListId = refId(tPlayer.structures, "target structures");
+    var sListId = refId(sPlayer.structures, "source structures");
+    if (!tr.defs.has(tListId) || !sr.defs.has(sListId)) throw new Error("structures list not found in one of the saves");
+    if (sr.objs.get(sListId) === undefined || tr.objs.get(tListId) === undefined)
+      throw new Error("structures list not decoded in one of the saves");
+    if (sr.objs.get(sListId)._class !== tr.objs.get(tListId)._class)
+      throw new Error("structures lists have different classes: " + tr.objs.get(tListId)._class + " / " + sr.objs.get(sListId)._class);
+
+    var sIx = indexTrace(sr), tIx = indexTrace(tr);
+    var ids = copyClosure(sr, sIx, [sListId]);
+
+    var maxId = 0;
+    tr.defs.forEach(function (d, k) { if (k > maxId) maxId = k; });
+    tr.refs.forEach(function (r) { if (r[1] > maxId) maxId = r[1]; });
+    var newid = new Map(), nxt = maxId + 1;
+    Array.from(ids).sort(function (a, b) { return a - b; }).forEach(function (oid) {
+      if (oid === sListId) newid.set(oid, tListId);   // the target's list keeps its id
+      else newid.set(oid, nxt++);
+    });
+
+    var listBytes = null, blocks = [], blockBytes = 0, sU = new Uint8Array(sourceBuf);
+    outerSpans(sr, ids).forEach(function (span) {
+      var bytes = copySpan(sU, sIx, span, newid);
+      if (span.oid === sListId) listBytes = bytes;
+      else { blocks.push(bytes); blockBytes += bytes.length; }
+    });
+    if (!listBytes) throw new Error("structures list was not copied");
+
+    var td = tr.defs.get(tListId), tU = new Uint8Array(targetBuf);
+    var total = td.start + listBytes.length + (tr.end - td.end) + blockBytes + (targetBuf.byteLength - tr.end);
+    var out = new Uint8Array(total), o = 0;
+    out.set(tU.subarray(0, td.start), o); o += td.start;
+    out.set(listBytes, o); o += listBytes.length;
+    out.set(tU.subarray(td.end, tr.end), o); o += tr.end - td.end;
+    blocks.forEach(function (b) { out.set(b, o); o += b.length; });
+    out.set(tU.subarray(tr.end), o);
+    return { bytes: out.buffer, objects: ids.size, bytesCopied: blockBytes + listBytes.length };
+  }
+
   var api = {
     parseWorld: parseWorld, gridInfo: gridInfo, checkEdits: checkEdits,
-    applyEdits: applyEdits, verify: verify, applyBT: applyBT
+    applyEdits: applyEdits, verify: verify, applyBT: applyBT, copyStructures: copyStructures
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.KCPatch = api;
@@ -737,7 +907,7 @@ function colourOf(i) {
   return TYPE_COLOUR[t] || '#ff00ff';
 }
 const ROCK_TYPES = [2, 4, 5];   // stone, unusable stone, iron
-const FOOTPRINTS = {"Mason":{"width":1,"depth":1},"apartment":{"width":2,"depth":4},"archer":{"width":1,"depth":1},"archerschool":{"width":2,"depth":3},"armytent":{"width":1,"depth":2},"baker":{"width":1,"depth":1},"ballista":{"width":1,"depth":1},"bathhouse":{"width":3,"depth":3},"blacksmith":{"width":2,"depth":2},"blockhouse":{"width":1,"depth":2},"bridge":{"width":2,"depth":2},"bridgehouse":{"width":1,"depth":3},"butcher":{"width":1,"depth":2},"castleblock":{"width":1,"depth":1},"cathedral":{"width":3,"depth":5},"cemetery":{"width":1,"depth":1},"cemetery44":{"width":1,"depth":2},"cemeterykeeper":{"width":1,"depth":1},"chamberofcommerce":{"width":4,"depth":4},"chamberofwar":{"width":2,"depth":3},"chapel":{"width":2,"depth":2},"charcoalmaker":{"width":1,"depth":1},"church":{"width":2,"depth":3},"clinic":{"width":1,"depth":1},"college":{"width":4,"depth":4},"commonshouse":{"width":2,"depth":3},"dock":{"width":2,"depth":2},"fancyhouse":{"width":1,"depth":2},"farm":{"width":1,"depth":1},"firehouse":{"width":1,"depth":1},"fishinghut":{"width":1,"depth":2},"forester":{"width":1,"depth":1},"fountain":{"width":3,"depth":4},"garden":{"width":1,"depth":1},"gate":{"width":1,"depth":1},"greathall":{"width":4,"depth":4},"hospital":{"width":2,"depth":2},"ironmine":{"width":1,"depth":1},"joustingarena":{"width":4,"depth":6},"keep":{"width":3,"depth":3},"largefountain":{"width":2,"depth":2},"largehouse":{"width":2,"depth":3},"largeproducestand":{"width":1,"depth":1},"largereservoir":{"width":2,"depth":2},"largestockpile":{"width":2,"depth":2},"largetavern":{"width":2,"depth":2},"largethroneroom":{"width":1,"depth":1},"library":{"width":1,"depth":3},"logisticshub":{"width":3,"depth":4},"manorhouse":{"width":1,"depth":1},"market":{"width":2,"depth":2},"markethall":{"width":3,"depth":4},"noria":{"width":2,"depth":3},"orchard":{"width":2,"depth":2},"park_pinetree":{"width":1,"depth":1},"park_reflectingpool":{"width":1,"depth":2},"producestand":{"width":1,"depth":1},"quarry":{"width":1,"depth":1},"road":{"width":1,"depth":1},"rowhouse":{"width":1,"depth":3},"rubble":{"width":1,"depth":1},"shippingcompany":{"width":4,"depth":5},"shop":{"width":1,"depth":1},"slum":{"width":3,"depth":3},"smallgranary":{"width":1,"depth":2},"smallhouse":{"width":1,"depth":1},"smallmarket":{"width":1,"depth":1},"smallslum":{"width":2,"depth":3},"stoneroad":{"width":1,"depth":1},"swineherd":{"width":2,"depth":3},"tavern":{"width":1,"depth":4},"theater":{"width":3,"depth":3},"throneroom":{"width":1,"depth":1},"townsquare":{"width":1,"depth":1},"university":{"width":5,"depth":5},"villa":{"width":3,"depth":3},"well":{"width":1,"depth":1},"windmill":{"width":1,"depth":1},"woodcastleblock":{"width":1,"depth":1}};  // footprint in cells per structure type (from footprints.json)
+const FOOTPRINTS = {"theater":{"width":3,"depth":3},"manorhouse":{"width":1,"depth":1},"keep":{"width":3,"depth":3},"bathhouse":{"width":3,"depth":3},"cemeterykeeper":{"width":1,"depth":1},"archer":{"width":1,"depth":1},"tavern":{"width":1,"depth":4},"largeproducestand":{"width":1,"depth":1},"garden":{"width":1,"depth":1},"Mason":{"width":1,"depth":1},"largethroneroom":{"width":1,"depth":1},"greathall":{"width":4,"depth":4},"park_reflectingpool":{"width":1,"depth":2},"largefountain":{"width":2,"depth":2},"forester":{"width":1,"depth":1},"blacksmith":{"width":2,"depth":2},"cemetery":{"width":1,"depth":1},"rowhouse":{"width":1,"depth":3},"commonshouse":{"width":2,"depth":3},"largehouse":{"width":2,"depth":3},"windmill":{"width":1,"depth":1},"shippingcompany":{"width":4,"depth":5},"fishinghut":{"width":1,"depth":2},"firehouse":{"width":1,"depth":1},"smallhouse":{"width":1,"depth":1},"rubble":{"width":1,"depth":1},"ironmine":{"width":1,"depth":1},"ballista":{"width":1,"depth":1},"smallgranary":{"width":1,"depth":2},"quarry":{"width":1,"depth":1},"road":{"width":1,"depth":1},"producestand":{"width":1,"depth":1},"fountain":{"width":3,"depth":4},"villa":{"width":3,"depth":3},"clinic":{"width":1,"depth":1},"university":{"width":5,"depth":5},"apartment":{"width":2,"depth":4},"market":{"width":2,"depth":2},"chamberofcommerce":{"width":4,"depth":4},"woodcastleblock":{"width":1,"depth":1},"butcher":{"width":1,"depth":2},"college":{"width":4,"depth":4},"dock":{"width":2,"depth":2},"markethall":{"width":3,"depth":4},"orchard":{"width":2,"depth":2},"slum":{"width":3,"depth":3},"cemetery44":{"width":1,"depth":2},"gate":{"width":1,"depth":1},"well":{"width":1,"depth":1},"swineherd":{"width":2,"depth":3},"park_pinetree":{"width":1,"depth":1},"logisticshub":{"width":3,"depth":4},"stoneroad":{"width":1,"depth":1},"charcoalmaker":{"width":1,"depth":1},"largestockpile":{"width":2,"depth":2},"largetavern":{"width":2,"depth":2},"armytent":{"width":1,"depth":2},"library":{"width":1,"depth":3},"noria":{"width":2,"depth":3},"fancyhouse":{"width":1,"depth":2},"largereservoir":{"width":2,"depth":2},"church":{"width":2,"depth":3},"smallslum":{"width":2,"depth":3},"hospital":{"width":2,"depth":2},"chamberofwar":{"width":2,"depth":3},"smallmarket":{"width":1,"depth":1},"farm":{"width":1,"depth":1},"townsquare":{"width":1,"depth":1},"baker":{"width":1,"depth":1},"joustingarena":{"width":4,"depth":6},"cathedral":{"width":3,"depth":5},"archerschool":{"width":2,"depth":3},"bridgehouse":{"width":1,"depth":3},"blockhouse":{"width":1,"depth":2},"chapel":{"width":2,"depth":2},"throneroom":{"width":1,"depth":1},"bridge":{"width":2,"depth":2},"shop":{"width":1,"depth":1},"castleblock":{"width":1,"depth":1}};  // footprint in cells per structure type (from footprints.json)
 const FOOT_CENTRE = false;      // false: a structure's position is its corner cell; true: its centre cell
 function paintCell(i) {
   const x = i % W, z = (i - x) / W, px = x * SIZE, pz = z * SIZE;
@@ -836,11 +1006,15 @@ c.addEventListener('mousedown', e => {
 c.addEventListener('mousemove', e => {
   const p = cellAt(e);
   showCell(p);
+  document.getElementById('coord').textContent = p ? `[${p.x}, ${p.z}]` : '[–, –]';
   if (selecting && p) { selEnd = p; drawOverlay(); }
   else if (copyMode === 'paste') { hover = p; drawOverlay(); }
   if (painting) strokePoint(p);
 });
-c.addEventListener('mouseleave', () => { if (copyMode === 'paste') { hover = null; drawOverlay(); } });
+c.addEventListener('mouseleave', () => {
+  document.getElementById('coord').textContent = '[–, –]';
+  if (copyMode === 'paste') { hover = null; drawOverlay(); }
+});
 window.addEventListener('mouseup', () => {
   if (selecting) {
     selecting = false;
@@ -1499,11 +1673,13 @@ showTab('editor');
 
 // ---- save compiler: apply edits to a save's world file, then download it ----
 let svWorld = null, svEdits = null, svUrl = null;
+const svStructSrc = { value: null };   // the source save whose buildings are copied
 const svBuild = document.getElementById('svBuild'), svDl = document.getElementById('svDownload'), svStatus = document.getElementById('svStatus');
 const svEditsNote = document.getElementById('svEditsNote');
 function svSay(msg, bad) { svStatus.textContent = msg; svStatus.style.color = bad ? '#ff8a7d' : ''; }
 function svRefresh() {
-  svBuild.disabled = !(svWorld && (document.getElementById('svBTOnly').checked ? svSource : svEdits));
+  const copyOn = document.getElementById('svCopyStructs').checked && svStructSrc.value;
+  svBuild.disabled = !(svWorld && (document.getElementById('svBTOnly').checked ? svSource : (svEdits || copyOn)));
   svDl.hidden = true;
   if (svUrl) { URL.revokeObjectURL(svUrl); svUrl = null; }
 }
@@ -1607,22 +1783,80 @@ function buildBT() {
     svSay('BT data copied: ' + res.replaced + ' entries updated, ' + res.skipped + ' skipped, ' + res.missing + ' not in the source. Click Download world.');
   } catch (err) { svSay('BT copy failed: ' + err.message, true); }
 }
+// Drop zone for a source save folder or file. Stores { buf, parsed, name } in `store.value`.
+function wireSourceZone(zoneId, inputId, noteId, store) {
+  const zone = document.getElementById(zoneId), input = document.getElementById(inputId), note = document.getElementById(noteId);
+  function set(buf, name) {
+    try {
+      store.value = { buf, parsed: KCPatch.parseWorld(buf), name };
+      note.textContent = name + ' loaded.';
+    } catch (err) {
+      store.value = null;
+      note.textContent = 'Not a readable save: ' + err.message;
+    }
+    svRefresh();
+  }
+  zone.addEventListener('click', () => input.click());
+  input.addEventListener('change', async () => { const f = input.files[0]; if (f) set(await f.arrayBuffer(), f.name); });
+  ['dragenter', 'dragover'].forEach(ev => zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.add('over'); }));
+  ['dragleave', 'dragend'].forEach(ev => zone.addEventListener(ev, () => zone.classList.remove('over')));
+  zone.addEventListener('drop', async e => {
+    e.preventDefault(); zone.classList.remove('over');
+    try {
+      const ents = [...e.dataTransfer.items].map(it => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+      const dir = ents.find(en => en.isDirectory);
+      if (dir) {
+        const files = await readEntries(dir);
+        const w = files.find(en => en.isFile && en.name === 'world');
+        if (!w) throw new Error('no world file in that folder');
+        set(await (await fileFromEntry(w)).arrayBuffer(), dir.name);
+      } else {
+        const f = e.dataTransfer.files[0];
+        if (f) set(await f.arrayBuffer(), f.name);
+      }
+    } catch (err) { note.textContent = 'Could not read that source: ' + err.message; }
+  });
+}
+wireSourceZone('svStructDrop', 'svStruct', 'svStructNote', svStructSrc);
+document.getElementById('svCopyStructs').addEventListener('change', e => {
+  document.getElementById('svStructDrop').hidden = !e.target.checked; svRefresh();
+});
+
 svBuild.addEventListener('click', () => {
   if (document.getElementById('svBTOnly').checked) { buildBT(); return; }
-  if (!svWorld || !svEdits) return;
+  if (!svWorld) return;
+  const copy = document.getElementById('svCopyStructs').checked;
+  if (!svEdits && !copy) return;
   try {
-    KCPatch.checkEdits(svWorld.parsed, svEdits);
-    if (document.getElementById('svBlank').checked) {
-      const want = parseInt(document.getElementById('svBaseSize').value, 10);
-      const have = KCPatch.gridInfo(svWorld.parsed).W;
-      if (have !== want) throw new Error('blank base is ' + have + ' but ' + want + ' was selected');
+    let buf = svWorld.buf, parsed = svWorld.parsed;
+    const notes = [];
+    if (copy) {
+      if (!svStructSrc.value) throw new Error('drop a source save for the buildings');
+      const srcGrid = KCPatch.gridInfo(svStructSrc.value.parsed);
+      const tgtGrid = KCPatch.gridInfo(parsed);
+      if (srcGrid.W !== tgtGrid.W || srcGrid.H !== tgtGrid.H)
+        throw new Error('the source map is ' + srcGrid.W + ' x ' + srcGrid.H + ' but this save is ' + tgtGrid.W + ' x ' + tgtGrid.H + '; buildings only line up on the same map size');
+      const res = KCPatch.copyStructures(buf, svStructSrc.value.buf);
+      buf = res.bytes;
+      parsed = KCPatch.parseWorld(buf);
+      notes.push('copied ' + res.objects.toLocaleString() + ' building objects');
     }
-    const res = KCPatch.applyEdits(svWorld.buf, svWorld.parsed, svEdits);
-    const v = KCPatch.verify(res.bytes, svEdits);
-    if (v.bad) { svSay('Verification failed: ' + v.bad + ' of ' + v.total + ' cells did not read back. Nothing was downloaded.', true); return; }
-    svUrl = URL.createObjectURL(new Blob([res.bytes], { type: 'application/octet-stream' }));
+    if (svEdits) {
+      KCPatch.checkEdits(parsed, svEdits);
+      if (document.getElementById('svBlank').checked) {
+        const want = parseInt(document.getElementById('svBaseSize').value, 10);
+        const have = KCPatch.gridInfo(parsed).W;
+        if (have !== want) throw new Error('blank base is ' + have + ' but ' + want + ' was selected');
+      }
+      const res = KCPatch.applyEdits(buf, parsed, svEdits);
+      const v = KCPatch.verify(res.bytes, svEdits);
+      if (v.bad) { svSay('Verification failed: ' + v.bad + ' of ' + v.total + ' cells did not read back. Nothing was downloaded.', true); return; }
+      buf = res.bytes;
+      notes.push('patched ' + res.changed + ' cells and verified all ' + v.total);
+    }
+    svUrl = URL.createObjectURL(new Blob([buf], { type: 'application/octet-stream' }));
     svDl.href = svUrl; svDl.download = 'world'; svDl.hidden = false;
-    svSay('Patched ' + res.changed + ' cells and verified all ' + v.total + '. Click Download world.');
+    svSay(notes.join('; ') + '. Click Download world.');
   } catch (err) {
     svSay('Build failed: ' + err.message, true);
   }
