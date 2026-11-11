@@ -52,6 +52,19 @@ header>div:not(.saveRow){text-align:left}
 .tabs .tab{flex:1;background:#23272d;border-radius:6px 6px 0 0}
 .tabs .tab.on{background:var(--panel);color:var(--accent);border-bottom-color:var(--panel)}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#f2c94c;color:#1e2227;padding:10px 16px;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.45);font-size:13px;max-width:80vw;z-index:20;display:none}
+/* phone and narrow screens: stack the panel under the map, and let touch paint the map */
+#c { touch-action: none; }
+@media (max-width: 800px) {
+  main { flex-direction: column; align-items: center; padding: 8px 8px 16px; }
+  #view { width: calc(100vw - 16px); height: auto; aspect-ratio: auto; }
+  #stage { position: relative; inset: auto; width: 100%; height: calc(100vw - 32px); }
+  #panel { position: static; width: 100%; max-height: none; overflow: visible; margin-top: 10px; }
+  #toggle { display: none; }
+}
+/* sub-tabs: one section of the Cell editor at a time */
+.subtabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.subtabs button { background: #23272d; color: var(--fg); border: 1px solid #3a4048; border-radius: 6px; padding: 5px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+.subtabs button.on { color: var(--accent); border-color: var(--accent); background: var(--panel); }
 </style></head>
 <body>
 <header>
@@ -1083,6 +1096,137 @@ header>div:not(.saveRow){text-align:left}
     return { bytes: result, kept: N, found: total, objects: ids.size, moved: moved };
   }
 
+  // Which coordinate objects move with the buildings at these roots. An object is decided by the
+  // member path that reaches it from a building, so a shared object follows the members that use it.
+  function movedPositions(sr, roots) {
+    var moved = new Set(), seen = new Set();
+    function walk(v, path, depth) {
+      if (!v || typeof v !== "object" || depth > 60) return;
+      if (v.ref !== undefined) {
+        var target = sr.objs.get(v.ref);
+        if (!target || typeof target !== "object") return;
+        if (target._class === "SerializableVector3") { if (isShiftPath(path)) moved.add(v.ref); return; }
+        if (target._oid !== undefined) {
+          var k1 = target._oid + "|" + path;
+          if (seen.has(k1)) return;
+          seen.add(k1);
+        }
+        walk(target, path, depth + 1);
+        return;
+      }
+      if (Array.isArray(v)) { v.forEach(function (x) { walk(x, path, depth + 1); }); return; }
+      if (v._class === "SerializableVector3") { if (isShiftPath(path) && v._oid !== undefined) moved.add(v._oid); return; }
+      if (v._oid !== undefined) {
+        var k2 = v._oid + "|" + path;
+        if (seen.has(k2)) return;
+        seen.add(k2);
+      }
+      for (var key in v) if (key !== "_class" && key !== "_oid") walk(v[key], path ? path + "." + key : key, depth + 1);
+    }
+    roots.forEach(function (b) { walk(b, "", 0); });
+    return moved;
+  }
+
+  // The first building of each type in a save's structures list: which list slot holds it and its cell.
+  function listTemplates(buf) {
+    var sr = traceWorld(buf);
+    var pl = resolveRef(sr, sr.root && sr.root.PlayerSaveData);
+    var list = resolveRef(sr, pl.structures);
+    var arr = sr.objs.get(refId(list._items, "structures items"));
+    var out = {};
+    arr.forEach(function (e) {
+      if (!e || e.ref === undefined) return;
+      var slot = sr.objs.get(e.ref) || [];
+      var first = slot[0];
+      var b = first && first.ref !== undefined ? sr.objs.get(first.ref) : first;
+      if (!b || b.uniqueName === undefined || out[b.uniqueName]) return;
+      var gp = resolveRef(sr, b.globalPosition), lp = resolveRef(sr, b.localPosition);
+      out[b.uniqueName] = { slot: e.ref, x: Math.floor(gp.x + lp.x), z: Math.floor(gp.z + lp.z) };
+    });
+    return out;
+  }
+
+  // Build the target's structures list from placements. Each placement copies one template slot
+  // (from the template save) and moves its building by (dx, dz) cells. Positions are moved only
+  // where the building uses them, so buildings keep their own shape and move as a whole.
+  //   placements: [{ slot: template slot id, dx, dz }]
+  function placeBuildings(targetBuf, templateBuf, placements) {
+    var tr = traceWorld(targetBuf), sr = traceWorld(templateBuf);
+    var tPlayer = resolveRef(tr, tr.root && tr.root.PlayerSaveData);
+    var sPlayer = resolveRef(sr, sr.root && sr.root.PlayerSaveData);
+    if (!tPlayer || !sPlayer) throw new Error("save has no PlayerSaveData");
+    var tListId = refId(tPlayer.structures, "target structures");
+    var sListId = refId(sPlayer.structures, "template structures");
+    var tDef = tr.defs.get(tListId), ld = sr.defs.get(sListId);
+    if (!tDef || tDef.rt !== 4) throw new Error("target structures list has an unexpected layout");
+    if (!ld || ld.rt !== 4) throw new Error("template structures list has an unexpected layout");
+    var sList = sr.objs.get(sListId);
+    var arrayId = refId(sList._items, "template structures items");
+    var sArr = sr.objs.get(arrayId), hdr = sr.arrayHeaders.get(arrayId);
+    if (!sArr || !hdr) throw new Error("template structures array not readable");
+
+    var sIx = indexTrace(sr), sU = new Uint8Array(templateBuf), tU = new Uint8Array(targetBuf);
+    var maxId = 0;
+    tr.defs.forEach(function (d, k) { if (k > maxId) maxId = k; });
+    tr.refs.forEach(function (r) { if (r[1] > maxId) maxId = r[1]; });
+    var nxt = maxId + 1;
+
+    var blocks = [], blockBytes = 0, slotIds = [];
+    placements.forEach(function (pl) {
+      var ids = copyClosure2(sr, sIx, [pl.slot], new Set());
+      var newid = new Map();
+      Array.from(ids).sort(function (a, b) { return a - b; }).forEach(function (oid) { newid.set(oid, nxt++); });
+      var roots = (sr.objs.get(pl.slot) || []).map(function (b) { return b && b.ref !== undefined ? sr.objs.get(b.ref) : b; });
+      var moved = movedPositions(sr, roots);
+      var pIx = Object.assign({}, sIx);
+      pIx.shifts = sr.shifts.filter(function (s) { return moved.has(s[2]); })
+        .map(function (s) { return [s[0], s[1]]; }).sort(function (a, b) { return a[0] - b[0]; });
+      pIx.shiftPos = pIx.shifts.map(function (s) { return s[0]; });
+      outerSpans(sr, Array.from(ids)).forEach(function (span) {
+        var bytes = copySpanT(sU, pIx, span, newid, pl.dx, pl.dz);
+        blocks.push(bytes); blockBytes += bytes.length;
+      });
+      slotIds.push(newid.get(pl.slot));
+    });
+
+    // the list's backing array: the template's header, the placed slots, then empty slots
+    var N = slotIds.length, arrayNew = nxt++;
+    var head = sU.slice(hdr.start, hdr.elemStart);
+    new DataView(head.buffer).setInt32(1, arrayNew, true);
+    var parts = [head];
+    slotIds.forEach(function (id) {
+      var rec = new Uint8Array(5); rec[0] = 9;
+      new DataView(rec.buffer).setInt32(1, id, true);
+      parts.push(rec);
+    });
+    var nulls = sArr.length - N;
+    if (nulls < 0) throw new Error("more buildings (" + N + ") than the structures list holds (" + sArr.length + ")");
+    if (nulls > 0) {
+      var nrec = new Uint8Array(5); nrec[0] = 14;
+      new DataView(nrec.buffer).setInt32(1, nulls, true);
+      parts.push(nrec);
+    }
+    var arrLen = parts.reduce(function (n, p) { return n + p.length; }, 0), arr = new Uint8Array(arrLen), ao = 0;
+    parts.forEach(function (p) { arr.set(p, ao); ao += p.length; });
+    blocks.push(arr); blockBytes += arr.length;
+
+    // the list record itself, with the target's id, the new array and the new size
+    var listBytes = sU.slice(ld.start, ld.end), ldv = new DataView(listBytes.buffer);
+    ldv.setInt32(1, tListId, true);
+    sr.refs.forEach(function (r) { if (r[0] >= ld.start && r[0] < ld.end && r[1] === arrayId) ldv.setInt32(r[0] - ld.start, arrayNew, true); });
+    sr.sizeFields.forEach(function (pos) { if (pos >= ld.start && pos < ld.end) ldv.setInt32(pos - ld.start, N, true); });
+
+    var td = tDef;
+    var outLen = td.start + listBytes.length + (tr.end - td.end) + blockBytes + (targetBuf.byteLength - tr.end);
+    var out = new Uint8Array(outLen), o = 0;
+    out.set(tU.subarray(0, td.start), o); o += td.start;
+    out.set(listBytes, o); o += listBytes.length;
+    out.set(tU.subarray(td.end, tr.end), o); o += tr.end - td.end;
+    blocks.forEach(function (b) { out.set(b, o); o += b.length; });
+    out.set(tU.subarray(tr.end), o);
+    return { bytes: out.buffer, kept: N, objects: nxt - maxId - 1 };
+  }
+
   var api = {
     parseWorld: parseWorld, gridInfo: gridInfo, checkEdits: checkEdits,
     applyEdits: applyEdits, verify: verify, applyBT: applyBT, copyStructures: copyStructures
@@ -1240,7 +1384,20 @@ function sameAsOriginal(i) {
 
 let painting = false;
 let pickMode = false, pickAction = 'fert';   // what a click on a landmass does: 'fert' or 'coast'
-c.addEventListener('mousedown', e => {
+// touch: the map only paints once it has been tapped on; tapping anywhere else puts it back to sleep
+let mapActive = false;
+c.style.touchAction = 'pan-x pan-y';   // while asleep, the page scrolls past the map
+function setMapActive(on) {
+  mapActive = on;
+  c.style.touchAction = on ? 'none' : 'pan-x pan-y';
+  c.style.outline = on ? '2px solid var(--accent)' : '';
+  document.getElementById('dlnote').textContent = on ? 'Map active: tap outside it to stop painting.' : '';
+}
+window.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'touch' && mapActive && e.target !== c) setMapActive(false);
+});
+c.addEventListener('pointerdown', e => {
+  if (e.pointerType === 'touch' && !mapActive) { setMapActive(true); return; }
   if (e.button !== 0) return;
   if (pickMode) {
     const p = cellAt(e);
@@ -1257,7 +1414,7 @@ c.addEventListener('mousedown', e => {
   currentStroke = [];
   strokePoint(cellAt(e));
 });
-c.addEventListener('mousemove', e => {
+c.addEventListener('pointermove', e => {
   const p = cellAt(e);
   showCell(p);
   document.getElementById('coord').textContent = p ? `[${p.x}, ${p.z}]` : '[–, –]';
@@ -1265,11 +1422,11 @@ c.addEventListener('mousemove', e => {
   else if (copyMode === 'paste') { hover = p; drawOverlay(); }
   if (painting) strokePoint(p);
 });
-c.addEventListener('mouseleave', () => {
+c.addEventListener('pointerleave', () => {
   document.getElementById('coord').textContent = '[–, –]';
   if (copyMode === 'paste') { hover = null; drawOverlay(); }
 });
-window.addEventListener('mouseup', () => {
+window.addEventListener('pointerup', () => {
   if (selecting) {
     selecting = false;
     selRect = normRect(selStart, selEnd);
@@ -2071,6 +2228,26 @@ function showTab(which) {
   tabSave.classList.toggle('on', !ed);
 }
 tabEd.addEventListener('click', () => showTab('editor'));
+// sub-tabs inside the Cell editor: each section (Paint, View, ...) gets its own tab; one shows at a time
+(function () {
+  const ed = document.getElementById('tab-editor');
+  const cards = [...ed.querySelectorAll(':scope > .card')];
+  const bar = document.createElement('div');
+  bar.className = 'subtabs';
+  const btns = cards.map((card, i) => {
+    const b = document.createElement('button');
+    b.textContent = card.querySelector('h2').textContent;
+    b.addEventListener('click', () => show(i));
+    bar.append(b);
+    return b;
+  });
+  function show(i) {
+    cards.forEach((c, k) => { c.style.display = k === i ? '' : 'none'; });
+    btns.forEach((b, k) => b.classList.toggle('on', k === i));
+  }
+  ed.prepend(bar);
+  show(0);
+})();
 tabSave.addEventListener('click', () => showTab('save'));
 showTab('editor');
 
