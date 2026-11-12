@@ -65,6 +65,9 @@ header>div:not(.saveRow){text-align:left}
 .subtabs { display: flex; flex-wrap: wrap; gap: 4px; }
 .subtabs button { background: #23272d; color: var(--fg); border: 1px solid #3a4048; border-radius: 6px; padding: 5px 9px; font: inherit; font-size: 12px; cursor: pointer; }
 .subtabs button.on { color: var(--accent); border-color: var(--accent); background: var(--panel); }
+/* phone note: shown only on narrow screens */
+.mobile-note { display: none; }
+@media (max-width: 800px) { .mobile-note { display: block; color: var(--muted); font-size: 12px; line-height: 1.4; padding: 6px 4px 10px; } }
 </style></head>
 <body>
 <header>
@@ -78,6 +81,7 @@ header>div:not(.saveRow){text-align:left}
     <div class="sub">Paint on the map, then download the changes. Edits are kept on this page only until you download them.</div>
   </div>
   <div class="sub" id="count">0 cells changed</div>
+  <div class="mobile-note">On a phone, turn it sideways for the map. To get save files onto your phone, send them to yourself on Discord.</div>
 </header>
 <main>
   <div id="view"><div id="stage"><canvas id="c"></canvas><canvas id="ov"></canvas></div><div id="zoombar"><span id="coord" class="sub">[&ndash;, &ndash;]</span><button id="zout" title="Zoom out">&minus;</button><button id="zin" title="Zoom in">+</button></div><button id="toggle">Hide tools</button>
