@@ -1127,7 +1127,8 @@ header>div:not(.saveRow){text-align:left}
     return moved;
   }
 
-  // The first building of each type in a save's structures list: which list slot holds it and its cell.
+  // The first building of each type in a save's structures list (any slot, any position within it):
+  // the building's object id and its cell.
   function listTemplates(buf) {
     var sr = traceWorld(buf);
     var pl = resolveRef(sr, sr.root && sr.root.PlayerSaveData);
@@ -1136,12 +1137,14 @@ header>div:not(.saveRow){text-align:left}
     var out = {};
     arr.forEach(function (e) {
       if (!e || e.ref === undefined) return;
-      var slot = sr.objs.get(e.ref) || [];
-      var first = slot[0];
-      var b = first && first.ref !== undefined ? sr.objs.get(first.ref) : first;
-      if (!b || b.uniqueName === undefined || out[b.uniqueName]) return;
-      var gp = resolveRef(sr, b.globalPosition), lp = resolveRef(sr, b.localPosition);
-      out[b.uniqueName] = { slot: e.ref, x: Math.floor(gp.x + lp.x), z: Math.floor(gp.z + lp.z) };
+      (sr.objs.get(e.ref) || []).forEach(function (item) {
+        var b = item && item.ref !== undefined ? sr.objs.get(item.ref) : item;
+        if (!b || b.uniqueName === undefined || out[b.uniqueName]) return;
+        var oid = item && item.ref !== undefined ? item.ref : b._oid;
+        if (oid === undefined) return;
+        var gp = resolveRef(sr, b.globalPosition), lp = resolveRef(sr, b.localPosition);
+        out[b.uniqueName] = { bld: oid, x: Math.floor(gp.x + lp.x), z: Math.floor(gp.z + lp.z) };
+      });
     });
     return out;
   }
@@ -1173,10 +1176,10 @@ header>div:not(.saveRow){text-align:left}
 
     var blocks = [], blockBytes = 0, slotIds = [];
     placements.forEach(function (pl) {
-      var ids = copyClosure2(sr, sIx, [pl.slot], new Set());
+      var ids = copyClosure2(sr, sIx, [pl.bld], new Set());
       var newid = new Map();
       Array.from(ids).sort(function (a, b) { return a - b; }).forEach(function (oid) { newid.set(oid, nxt++); });
-      var roots = (sr.objs.get(pl.slot) || []).map(function (b) { return b && b.ref !== undefined ? sr.objs.get(b.ref) : b; });
+      var roots = [sr.objs.get(pl.bld)];
       var moved = movedPositions(sr, roots);
       var pIx = Object.assign({}, sIx);
       pIx.shifts = sr.shifts.filter(function (s) { return moved.has(s[2]); })
@@ -1186,7 +1189,12 @@ header>div:not(.saveRow){text-align:left}
         var bytes = copySpanT(sU, pIx, span, newid, pl.dx, pl.dz);
         blocks.push(bytes); blockBytes += bytes.length;
       });
-      slotIds.push(newid.get(pl.slot));
+      // each placed building gets its own list slot that holds only that building
+      var slotOid = nxt++, slotBytes = new Uint8Array(14), sdv = new DataView(slotBytes.buffer);
+      slotBytes[0] = 16; sdv.setInt32(1, slotOid, true); sdv.setInt32(5, 1, true);
+      slotBytes[9] = 9; sdv.setInt32(10, newid.get(pl.bld), true);
+      blocks.push(slotBytes); blockBytes += slotBytes.length;
+      slotIds.push(slotOid);
     });
 
     // the list's backing array: the template's header, the placed slots, then empty slots
@@ -1852,12 +1860,12 @@ function coastLandmass(L) {
   // 1. cliffs: stretches of shore land become stone instead of beach
   const shore = L.filter(c => nb8(c).some(n => cells[n][0] === 3));
   const cliffNoise = new Map();
-  shore.forEach(c => cliffNoise.set(c, rnd()));
+  shore.forEach(c => cliffNoise.set(c, Math.random()));
   smoothNoise(shore, cliffNoise, 2);
   shore.forEach(c => { if (cliffNoise.get(c) > 0.6) setCell(c, [2, 0, 0, 0, 0]); });
   // 2. how far the shallow band reaches from each water cell: more land around = a bay = further out
   const waterKeys = [...dist.keys()], wNoise = new Map();
-  waterKeys.forEach(c => wNoise.set(c, rnd() * 2 - 1));
+  waterKeys.forEach(c => wNoise.set(c, Math.random() * 2 - 1));
   smoothNoise(waterKeys, wNoise, 2);
   const reach = new Map();
   dist.forEach((d, c) => {
@@ -1879,7 +1887,7 @@ function coastLandmass(L) {
   });
   // 4. some deep pockets inside the shallow band
   waterKeys.forEach(c => {
-    if (dist.get(c) <= reach.get(c) && rnd() < 0.03) {
+    if (dist.get(c) <= reach.get(c) && Math.random() < 0.03) {
       setCell(c, [3, 0, 0, 1, 1]);
       nb8(c).forEach(n => { if (cells[n][0] === 3 && dist.has(n)) setCell(n, [3, 0, 0, 1, 1]); });
     }
@@ -2275,7 +2283,7 @@ function placeEditorBuildings(parsed, list) {
     if (!(cx >= 0 && cz >= 0 && cx < g.W && cz < g.H)) { outside.push(b.name + ' at ' + cx + ',' + cz); return; }
     const t = svTemplates[b.name];
     if (!t) { if (!missing.includes(b.name)) missing.push(b.name); return; }
-    placements.push({ slot: t.slot, dx: cx - t.x, dz: cz - t.z });
+    placements.push({ bld: t.bld, dx: cx - t.x, dz: cz - t.z });
   });
   if (missing.length) throw new Error('no template for: ' + missing.join(', '));
   if (outside.length) throw new Error(outside.length + ' buildings are off this map, e.g. ' + outside[0]);
